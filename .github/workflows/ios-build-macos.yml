@@ -12,14 +12,14 @@ on:
   push:
     paths:
       - .github/workflows/ios-build-macos.yml
-concurrency:
-  group: ios-build-macos
-  cancel-in-progress: true
+# 不加 concurrency：之前两次构建在**排队阶段**被同组的 cancel-in-progress 干掉
+# （run 45820823532 / 45827829689 都是 steps 空、conclusion=cancelled），白等半小时。
+# 宁可让它们排队等着，也不要互相取消。
 
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
