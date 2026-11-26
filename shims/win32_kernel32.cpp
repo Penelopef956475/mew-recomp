@@ -680,7 +680,15 @@ std::unordered_map<uint64_t, std::string>& g_synth_names() {
     static std::unordered_map<uint64_t, std::string> m;
     return m;
 }
-bool& g_api_trace() { static bool on = false; return on; }
+bool& g_api_trace() {
+    // MEW_API_TRACE=1：从进程启动就开始打印每一次「合成桥」API 调用（调用前/后各一行），
+    // 而不是等到 FlsSetValue 才打开。定位「某个 API 拿到 rcx=0 然后崩」就靠它。
+    static bool on = [] {
+        const char* e = std::getenv("MEW_API_TRACE");
+        return e && *e && *e != '0';
+    }();
+    return on;
+}
 
 void mew_api_trace_impl(uint64_t va, X64Ctx* c, int post) {
     const std::string* nm = nullptr;
