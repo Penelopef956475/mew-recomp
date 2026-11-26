@@ -1,0 +1,47 @@
+name: Host build probe (Linux -> iOS Mach-O)
+
+# 只为「拿到完整编译/链接报错」而生：全程 set +e，最后 exit 0，
+# 这样日志一定保留（失败的 job 常常取不到 log blob）。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装工具链
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang lld binutils
+          clang --version | head -1
+          ls -l /usr/bin/ld64.lld || true
+      - name: 编译 + 链接（每步打印 rc，整体不失败）
+        run: |
+          set +e
+          ROOT="$PWD"
+          CC=clang
+          RESDIR="$($CC -print-resource-dir)"
+          echo "=== resource dir: $RESDIR"
+          ls "$RESDIR/include" | head -5
+          echo "=== compile host_nosdk.c"
+          $CC -target arm64-apple-ios15.0 -O2 -fno-stack-protector -nostdlibinc \
+              -isystem "$RESDIR/include" -c "$ROOT/ios_port/host_nosdk.c" -o /tmp/host.o 2>&1 | head -60
+          echo "rc_host=$?"
+          echo "=== compile start_nosdk.S"
+          $CC -target arm64-apple-ios15.0 -c "$ROOT/ios_port/start_nosdk.S" -o /tmp/start.o 2>&1 | head -30
+          echo "rc_start=$?"
+          ls -l /tmp/host.o /tmp/start.o 2>/dev/null
+          echo "=== link with ld64.lld"
+          ld64.lld -arch arm64 -platform_version ios 15.0 15.0 \
+              -undefined dynamic_lookup -e _start -o /tmp/MewHost /tmp/start.o /tmp/host.o 2>&1 | head -60
+          echo "rc_link=$?"
+          ls -l /tmp/MewHost 2>/dev/null && {
+            echo "=== strings 检查"
+            strings /tmp/MewHost | grep -E 'SDL_RunApp|mew.log|SDL3.framework' | head -10
+            echo "=== 头部"
+            xxd -l 64 /tmp/MewHost 2>/dev/null || od -A x -t x1z -v -N 64 /tmp/MewHost
+          }
+          echo "=== 全部步骤跑完（不因失败中断）"
+          exit 0
