@@ -28,6 +28,10 @@ _bionic_\name:
 VARARG_THUNK snprintf, mew_vararg_snprintf
 
 VARARG_THUNK __android_log_print, mew_vararg_android_log_print
+VARARG_THUNK printf, mew_vararg_printf
+VARARG_THUNK fprintf, mew_vararg_fprintf
+VARARG_THUNK syslog, mew_vararg_syslog
+VARARG_THUNK swprintf, mew_vararg_swprintf
 
 // sscanf 只需要整数槽：x_slots + caller_sp
     .globl _bionic_sscanf
