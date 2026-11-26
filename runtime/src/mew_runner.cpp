@@ -30,11 +30,33 @@ void timeout_handler(int) {
 void crash_handler(int sig, siginfo_t* si, void*) {
     void* bt[64];
     int n = backtrace(bt, 64);
-    std::fprintf(stderr, "\n[CRASH] signal=%d fault=0x%llx frames=%d\n", sig,
-                 (unsigned long long)(uintptr_t)si->si_addr, n);
+    const uint64_t fault = (uint64_t)(uintptr_t)(si ? si->si_addr : nullptr);
+    const uint64_t in_fn = cur_fn_va();
+
+    // 重点三件事：**fault_addr**、**in_fn（哪个 guest 函数在跑）**、最后 15 帧。
+    // 关掉 MEW_SAFE_MEM 时这里是唯一的现场来源：开安全内存时非法访存被静默
+    // 拦成 0，循环条件永远不满足、原地空转（表现为 rc=124 超时）；一关掉就
+    // 当场 SIGSEGV——所以这行就是「真凶地址」。
+    std::fprintf(stderr, "\n[CRASH] signal=%d fault=0x%llx in_fn=sub_0x%llx frames=%d\n",
+                 sig, (unsigned long long)fault, (unsigned long long)in_fn, n);
+
+    if (X64Ctx* c = cur_ctx_ptr()) {
+        std::fprintf(stderr,
+            "[CRASH] ctx: rax=0x%llx rbx=0x%llx rcx=0x%llx rdx=0x%llx\n"
+            "[CRASH]      rsi=0x%llx rdi=0x%llx rbp=0x%llx rsp=0x%llx r8=0x%llx r9=0x%llx\n",
+            (unsigned long long)c->rax, (unsigned long long)c->rbx,
+            (unsigned long long)c->rcx, (unsigned long long)c->rdx,
+            (unsigned long long)c->rsi, (unsigned long long)c->rdi,
+            (unsigned long long)c->rbp, (unsigned long long)c->rsp,
+            (unsigned long long)c->r8,  (unsigned long long)c->r9);
+    }
+
+    std::fprintf(stderr, "[CRASH] 最后 15 帧 guest 调用环：\n");
+    call_trace().dump_tail(15);
+
     backtrace_symbols_fd(bt, n, 2);
-    // 崩溃时把最近 64 层调用环打出来：哪个 guest 函数、rcx 是什么、谁调的
-    call_trace().dump("crash");
+    if (std::getenv("MEW_CRASH_FULL"))      // 需要完整环时再开，默认只打 15 帧
+        call_trace().dump("crash");
     std::fflush(stderr);
     _exit(139);
 }
