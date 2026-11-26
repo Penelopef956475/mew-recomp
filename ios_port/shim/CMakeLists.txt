@@ -7,7 +7,9 @@ add_library(bionic_shim SHARED
     bionic_android.c
     bionic_tlsdesc.c
     bionic_varargs.S
-    bionic_varargs.c)
+    bionic_varargs.c
+    bionic_libc.c
+    bionic_jmp.S)
 target_include_directories(bionic_shim PRIVATE .)
 set_target_properties(bionic_shim PROPERTIES
     OUTPUT_NAME bionic_shim
