@@ -1,0 +1,203 @@
+name: iOS IPA on Linux (no mac needed)
+
+# 目标：**彻底摆脱 macOS 排队**。
+#
+# 思路：一个 iOS 包只有三件东西必须由 macOS 编出来——SDL3.framework、libbionic_shim.dylib、
+# MewHost。这三件一旦编好就几乎不变（只有改 shim/宿主源码时才会变），所以把它们固化到
+# Release 资产 `mac-products-v1` 里；此后每次出 IPA 只需要在 Ubuntu 上：
+#   1) ELF -> Mach-O 转换 + 官方工具链门禁（本来就全在 Linux）
+#   2) 取回三件产物 + 组 .app
+#   3) ldid 做 ad-hoc 签名（侧载工具反正会重签；没有 ldid 就出未签名包）
+#   4) 打包 .ipa
+#
+# 更新产物：手动跑 `refresh-mac-products` job（要抢一次 macOS 槽位），
+# 它会把新的三件覆盖上传到同一个 Release tag。
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'ipa = 只组装（不需要 macOS）；refresh = 重新编三件产物（要 macOS）'
+        required: false
+        default: 'ipa'
+  push:
+    paths:
+      - .github/workflows/ios-build-linux-ipa.yml
+      - ios_port/assemble_ipa_linux.sh
+
+env:
+  PRODUCTS_TAG: mac-products-v1
+  PRODUCTS_ASSET: mac-products-v1.tar.gz
+
+jobs:
+  # ---------- A. Ubuntu：转换 + 门禁（永远是 Linux） ----------
+  prepare-dylib:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 组装 APK + 抽 libmain.so
+        run: |
+          set -euo pipefail
+          cat ios_port/vendor/apk_part_*.bin > /tmp/app.apk
+          python3 - <<'PY'
+          import zipfile, os
+          z = zipfile.ZipFile('/tmp/app.apk')
+          open('/tmp/libmain.so','wb').write(z.read('lib/arm64-v8a/libmain.so'))
+          print('libmain.so', os.path.getsize('/tmp/libmain.so'))
+          PY
+
+      - name: ELF -> Mach-O + 自带 walker
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 tools/elf2macho_dylib.py /tmp/libmain.so -o out/libmew_relinked.dylib --platform ios
+          python3 ios_port/verify_macho.py out/libmew_relinked.dylib
+
+      - name: llvm-objdump --macho 门禁
+        run: |
+          set -o pipefail
+          command -v llvm-objdump >/dev/null || {
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq llvm
+          }
+          OBJDUMP=$(command -v llvm-objdump || echo /usr/lib/llvm-18/bin/llvm-objdump)
+          D=out/libmew_relinked.dylib
+          set +e
+          $OBJDUMP --macho --private-headers $D > /tmp/o_h.txt 2>&1; echo "rc_headers=$?"
+          $OBJDUMP --macho --exports-trie  $D > /tmp/o_e.txt 2>&1; echo "rc_exports=$?"
+          $OBJDUMP --macho --rebase        $D > /tmp/o_r.txt 2>&1; echo "rc_rebase=$?"
+          $OBJDUMP --macho --bind          $D > /tmp/o_b.txt 2>&1; echo "rc_bind=$?"
+          set -e
+          RB=$(grep -c '0x' /tmp/o_r.txt || true); BD=$(grep -c '0x' /tmp/o_b.txt || true)
+          echo "rebase_total=$RB bind_total=$BD"
+          if grep -nE 'malformed|inconsistent|bad offset|bad segIndex|too large' /tmp/o_*.txt; then
+            echo "::error::llvm-objdump 报结构错误"; exit 1
+          fi
+          [ "$RB" = "76945" ] && [ "$BD" = "1348" ] || { echo "::error::计数不符 $RB/$BD"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relinked-dylib
+          path: out/libmew_relinked.dylib
+          retention-days: 3
+
+  # ---------- B. Ubuntu：组装 + 签名 + 打包（不需要 macOS） ----------
+  assemble-ipa:
+    needs: prepare-dylib
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取重链接产物
+        uses: actions/download-artifact@v4
+        with:
+          name: relinked-dylib
+          path: out/
+
+      - name: 取三件 macOS 产物（Release 资产，公开仓免 token）
+        env:
+          TAG: ${{ env.PRODUCTS_TAG }}
+          ASSET: ${{ env.PRODUCTS_ASSET }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${{ github.repository }}/releases/download/$TAG/$ASSET"
+          echo "GET $URL"
+          curl -fL --retry 5 -o /tmp/products.tar.gz "$URL"
+          mkdir -p out/products
+          tar -xzf /tmp/products.tar.gz -C out/products
+          ls -l out/products
+
+      - name: 编 ldid（ad-hoc 签名；失败就算了，侧载工具会重签）
+        run: |
+          set +e
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make clang libssl-dev libplist-dev zlib1g-dev
+          git clone --depth 1 https://github.com/ProcursusTeam/ldid.git /tmp/ldid
+          make -C /tmp/ldid -j"$(nproc)"
+          sudo cp /tmp/ldid/ldid /usr/local/bin/ldid 2>/dev/null && ldid -h >/dev/null 2>&1 && echo "ldid 可用"
+          exit 0
+
+      - name: 组装 IPA（Linux）
+        run: |
+          set -euo pipefail
+          chmod +x ios_port/assemble_ipa_linux.sh
+          OUT="$PWD/out" bash ios_port/assemble_ipa_linux.sh
+
+      - name: 失败也要留现场
+        if: always()
+        run: |
+          echo "===== out ====="; ls -lR out 2>/dev/null | head -30 || true
+          echo "===== report ====="; cat out/assemble_report.txt 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-ipa-linux-${{ github.run_id }}
+          path: |
+            out/*.ipa
+            out/assemble_report.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------- C. 只在需要刷新三件产物时才跑 macOS ----------
+  refresh-mac-products:
+    if: github.event.inputs.mode == 'refresh'
+    runs-on: ${{ github.event.inputs.runner || 'macos-15' }}
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取重链接产物（build_ios.sh 需要它才肯跑）
+        uses: actions/download-artifact@v4
+        with:
+          name: relinked-dylib
+          path: out/
+
+      - name: SDL3.framework 缓存
+        id: sdl-cache
+        uses: actions/cache@v4
+        with:
+          path: out/sdlbuild/SDL3.framework
+          key: sdl3fw-release-3.2.0-gles-metal-gpu-v1
+
+      - name: 编 SDL3（缓存未命中时）
+        if: steps.sdl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p out/sdlbuild
+          timeout 300 git clone --depth 1 --branch release-3.2.0 https://github.com/libsdl-org/SDL.git out/SDL
+          timeout 240 cmake -S out/SDL -B out/sdlbuild -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_FRAMEWORK=ON \
+            -DSDL_OPENGLES=ON -DSDL_OPENGL=ON -DSDL_METAL=ON -DSDL_GPU=ON \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          timeout 600 cmake --build out/sdlbuild --config Release -j "$(sysctl -n hw.ncpu)"
+          rm -rf out/sdlbuild/SDL3.framework
+          cp -R out/sdlbuild/Release-iphoneos/SDL3.framework out/sdlbuild/SDL3.framework
+
+      - name: 编 shim + 宿主（复用 build_ios.sh，跳过重链接）
+        env:
+          SKIP_RELINK: '1'
+        run: |
+          set -euo pipefail
+          chmod +x ios_port/build_ios.sh
+          ./ios_port/build_ios.sh
+
+      - name: 收敛三件产物
+        run: |
+          set -euo pipefail
+          mkdir -p out/products
+          cp out/shimbuild/MewHost out/products/
+          cp out/shimbuild/libbionic_shim.dylib out/products/
+          rm -rf out/products/SDL3.framework
+          cp -R out/sdlbuild/SDL3.framework out/products/
+          tar -czf /tmp/mac-products-v1.tar.gz -C out/products MewHost libbionic_shim.dylib SDL3.framework
+          ls -l /tmp/mac-products-v1.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-products
+          path: /tmp/mac-products-v1.tar.gz
+          retention-days: 30
