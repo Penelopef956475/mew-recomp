@@ -107,7 +107,10 @@ num "符号覆盖 $NEXP / $NEXP 全部就位"
 
 # ---------- 5) 宿主 ----------
 say "stage 5/7 编译 MewHost"
+# 宿主也要链 SDL3：缺数据时要弹 SDL_ShowSimpleMessageBox，光声明不链接会在
+# dyld 绑定时 "symbol not found"。framework 就在包里 Frameworks/ 下，用 rpath 找。
 "$CLANG" -target "${ARCH}-apple-ios${MIN_IOS}" -isysroot "$SDK" -O2 \
+    -F "${OUT}/sdlbuild" -framework SDL3 \
     -o "${OUT}/shimbuild/MewHost" "${ROOT}/ios_port/host_main.c" \
     -Wl,-rpath,@executable_path/Frameworks 2>&1 | tail -20 | tee -a "$REPORT"
 num "MewHost $(stat -f%z "${OUT}/shimbuild/MewHost") bytes"
