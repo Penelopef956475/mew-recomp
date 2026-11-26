@@ -406,18 +406,26 @@ jobs:
           tail -40 generated/runner_b.err
           echo
           echo "########## 定点函数观测：谁在算那个 hash bucket count ##########"
-          echo "===== 桶数进度曲线（每 200 次 rehash 打一行，rdx = 桶数）====="
+          echo "===== 热循环进度曲线（0x140386250 每 200 次进一次，rcx 是当前桶数/长度）====="
           MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 \
-            MEW_TRACE_FN=0x1403862d0 MEW_TRACE_FN_EVERY=200 \
-            timeout 240 ./build-stage3b/mew_runner Mewgenics.exe \
+            MEW_TRACE_FN=0x140386250 MEW_TRACE_FN_EVERY=200 \
+            timeout 180 ./build-stage3b/mew_runner Mewgenics.exe \
             > generated/fn_curve.out 2> generated/fn_curve.err || true
-          grep -E '^\[fn#' generated/fn_curve.err | head -60 || true
+          grep -E '^\[fn#' generated/fn_curve.err | head -40 || true
+          echo "----- 同一函数每 2000 次的稀疏采样（看长程趋势）-----"
+          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 \
+            MEW_TRACE_FN=0x140386250 MEW_TRACE_FN_EVERY=2000 \
+            timeout 120 ./build-stage3b/mew_runner Mewgenics.exe \
+            > generated/fn_curve2.out 2> generated/fn_curve2.err || true
+          grep -E '^\[fn#' generated/fn_curve2.err | head -20 || true
 
           echo "===== 提速对照：关掉 MEW_SAFE_MEM + ABI_GUARD，看是不是 -O0/拦截太慢 ====="
           T1=$(date +%s)
+          set +e
           MEW_UNIMPL_CONTINUE=1 timeout 300 ./build-stage3b/mew_runner Mewgenics.exe \
             > generated/fn_fast.out 2> generated/fn_fast.err
           RC1=$?
+          set -e
           echo "fast-mode rc=$RC1 elapsed=$(( $(date +%s) - T1 ))s"
           echo "fast-mode gpak_refs=$(grep -c 'resources.gpak' generated/fn_fast.err || true)"
           grep -E '^\[fn#|CreateFileW|resources\.gpak|MSVC C\+\+' generated/fn_fast.err | tail -15 || true
