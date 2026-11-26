@@ -1151,8 +1151,13 @@ LiftResult liftLinearEx(const PeImage& pe, uint64_t va, uint32_t size, uint32_t 
         } else if (mn == "bsf" || mn == "bsr" || mn == "tzcnt" || mn == "lzcnt" || mn == "popcnt") {
             int w = ops[0].size / 8;
             std::string src = valExpr(pe, insn, ops[1], next_rip, e);
+            // 注意 bsr 与 lzcnt 的语义相反：
+            //   bsr  -> 最高置位 bit 的下标（63 - clz）
+            //   lzcnt-> 前导零个数（clz）
+            // 以前把两者合成 x64_clz，直接让 _Hash 的桶上限从 2^59 变成 2^4。
             std::string fn = (mn == "bsf" || mn == "tzcnt") ? "x64_ctz"
-                           : (mn == "bsr" || mn == "lzcnt") ? "x64_clz" : "x64_popcnt";
+                           : (mn == "bsr") ? "x64_bsr"
+                           : (mn == "lzcnt") ? "x64_clz" : "x64_popcnt";
             storeExpr(pe, insn, ops[0], fn + "(" + src + ", " + std::to_string(w * 8) + ")", next_rip, w, e);
             if (mn == "bsf" || mn == "bsr") {
                 e.out << "  (void)sub_flags(ctx," << src << ",0ULL," << w << ");\n";
@@ -2375,8 +2380,13 @@ LiftResult liftReachableEx(const PeImage& pe, uint64_t va, uint32_t size, uint32
         } else if (mn == "bsf" || mn == "bsr" || mn == "tzcnt" || mn == "lzcnt" || mn == "popcnt") {
             int w = ops[0].size / 8;
             std::string src = valExpr(pe, insn, ops[1], next_rip, e);
+            // 注意 bsr 与 lzcnt 的语义相反：
+            //   bsr  -> 最高置位 bit 的下标（63 - clz）
+            //   lzcnt-> 前导零个数（clz）
+            // 以前把两者合成 x64_clz，直接让 _Hash 的桶上限从 2^59 变成 2^4。
             std::string fn = (mn == "bsf" || mn == "tzcnt") ? "x64_ctz"
-                           : (mn == "bsr" || mn == "lzcnt") ? "x64_clz" : "x64_popcnt";
+                           : (mn == "bsr") ? "x64_bsr"
+                           : (mn == "lzcnt") ? "x64_clz" : "x64_popcnt";
             storeExpr(pe, insn, ops[0], fn + "(" + src + ", " + std::to_string(w * 8) + ")", next_rip, w, e);
             if (mn == "bsf" || mn == "bsr") {
                 e.out << "  (void)sub_flags(ctx," << src << ",0ULL," << w << ");\n";
