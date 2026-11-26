@@ -82,9 +82,32 @@ jobs:
           path: out/libmew_relinked.dylib
           retention-days: 3
 
+  # ---------- A2. Ubuntu：凭空编出新的 iOS MewHost（不需要 macOS） ----------
+  build-host-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 clang + lld(ld64.lld)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang lld binutils
+      - name: 编 MewHost（arm64-apple-ios15，无 SDK）
+        run: |
+          set -euo pipefail
+          chmod +x ios_port/build_host_linux.sh
+          OUT="$PWD/out" bash ios_port/build_host_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mewhost-linux
+          path: |
+            out/products/MewHost
+            out/build_host_linux.txt
+          retention-days: 3
+
   # ---------- B. Ubuntu：组装 + 签名 + 打包（不需要 macOS） ----------
   assemble-ipa:
-    needs: prepare-dylib
+    needs: [prepare-dylib, build-host-linux]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -108,6 +131,21 @@ jobs:
           mkdir -p out/products
           tar -xzf /tmp/products.tar.gz -C out/products
           ls -l out/products
+
+      - name: 用 Linux 编出来的 MewHost 覆盖 Release 里的旧版
+        uses: actions/download-artifact@v4
+        with:
+          name: mewhost-linux
+          path: out/products_new
+      - name: 覆盖 + 复核
+        run: |
+          set -euo pipefail
+          ls -l out/products_new
+          cp out/products_new/MewHost out/products/MewHost
+          chmod +x out/products/MewHost
+          strings out/products/MewHost | grep -q SDL_RunApp || { echo "::error::新 MewHost 没 SDL_RunApp"; exit 1; }
+          strings out/products/MewHost | grep -q mew.log    || { echo "::error::新 MewHost 没 mew.log"; exit 1; }
+          echo "MewHost 已替换为 Linux 编译版"
 
       - name: 编 ldid（ad-hoc 签名；失败就算了，侧载工具会重签）
         run: |
