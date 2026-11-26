@@ -394,6 +394,15 @@ jobs:
           grep -E '^\s+\[[0-9]+\] API ' generated/runner_b.err | tail -60 || true
           echo "===== 尾 40 行 ====="
           tail -40 generated/runner_b.err
+          echo
+          echo "########## 定点函数观测：谁在算那个 hash bucket count ##########"
+          for FN in 0x14038647e 0x1403862d0 0x140386180; do
+            echo "===== MEW_TRACE_FN=$FN ====="
+            MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 MEW_TRACE_FN=$FN \
+              timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
+              > generated/fn_${FN}.out 2> generated/fn_${FN}.err || true
+            grep -E '^\[fn\]|\[fn:rcx\+0x88\]|\[fn:rdx\]|MSVC C\+\+|invalid hash|可捕获类型' generated/fn_${FN}.err | head -45 || true
+          done
           # 复跑一次：看 abort 判定函数 0x140d79870 的入参 + 关键全局的读写打点
           RC=0
           MEW_WATCH=0x200001088,0x200001090,0x2000013a8,0x1413bbc18 MEW_TRACE_FN=0x140d79870 \
