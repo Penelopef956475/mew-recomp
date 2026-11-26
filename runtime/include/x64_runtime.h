@@ -97,6 +97,16 @@ inline uint64_t mew_trace_fn() {
 // MEW_TRACE_FN_MIN_RDX=0x<阈值>：只在这个函数的 rdx >= 阈值时才打印，**不限次数**。
 // 用途：哈希表 rehash 那个函数平时被调几千次、rdx 都是 8/16/64 这种正常值，
 // 真正要看的是「哪一次 rdx 突然变成天文数字」，前 40 次采样根本抓不到。
+// MEW_TRACE_FN_EVERY=N：每第 N 次进入该函数就打印一次（不限次数）。
+// 用途：看「桶数随时间怎么长」——每 200 次 rehash 打一行 rdx，曲线立刻就出来了。
+inline uint64_t mew_trace_every() {
+    static uint64_t v = [] {
+        const char* e = std::getenv("MEW_TRACE_FN_EVERY");
+        return e ? (uint64_t)std::strtoull(e, nullptr, 0) : 0ULL;
+    }();
+    return v;
+}
+
 inline uint64_t mew_trace_min_rdx() {
     static uint64_t v = [] {
         const char* e = std::getenv("MEW_TRACE_FN_MIN_RDX");
@@ -116,6 +126,18 @@ inline uint64_t mew_trace_min_rdx() {
             _f.rsi = (CTX)->rsi; _f.rdi = (CTX)->rdi; _f.r12 = (CTX)->r12;        \
             _f.r13 = (CTX)->r13; _f.r14 = (CTX)->r14; _f.r15 = (CTX)->r15;        \
             _f.valid = true;                                                      \
+        }                                                                         \
+        if (mew_trace_fn() == (uint64_t)(VA) && mew_trace_every()) {          \
+            static uint64_t _mew_n = 0;                                           \
+            uint64_t _every = mew_trace_every();                                  \
+            if ((_mew_n++ % _every) == 0) {                                       \
+                std::fprintf(stderr,                                               \
+                    "[fn#%llu] 0x%llx rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx rsp=0x%llx\n", \
+                    (unsigned long long)(_mew_n - 1), (unsigned long long)(VA),    \
+                    (unsigned long long)(CTX)->rcx, (unsigned long long)(CTX)->rdx,\
+                    (unsigned long long)(CTX)->r8, (unsigned long long)(CTX)->r9,  \
+                    (unsigned long long)(CTX)->rsp);                              \
+            }                                                                     \
         }                                                                         \
         if (mew_trace_fn() == (uint64_t)(VA) && mew_trace_min_rdx() &&        \
             (CTX)->rdx >= mew_trace_min_rdx()) {                                  \
