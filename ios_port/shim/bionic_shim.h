@@ -23,6 +23,23 @@ int *bionic_errno_slot(void);            // 返回线程局部 int*（Bionic 语
 int  darwin_to_bionic_errno(int d);
 int  bionic_to_darwin_errno(int b);
 
+// ---------------- Bionic AArch64 va_list（32 字节结构体） ----------------
+// q0..q7 保存区每槽 16 字节，所以 __vr_offs 步长是 16（不是 8）。
+typedef struct {
+    uint8_t* __stack;
+    uint8_t* __gr_top;
+    uint8_t* __vr_top;
+    int      __gr_offs;
+    int      __vr_offs;
+} BionicVaList;
+
+// 把 bionic va_list 重排成 Darwin 的扁平槽数组，再由调用方转给 v*printf
+int mew_va_build_from_bionic(uint64_t* out, int cap, const char* fmt, BionicVaList* ap);
+int mew_vararg_vfprintf(void* f, const char* fmt, BionicVaList* ap);
+int mew_vararg_vsnprintf(char* buf, size_t n, const char* fmt, BionicVaList* ap);
+int mew_vararg_vasprintf(char** out, const char* fmt, BionicVaList* ap);
+int mew_vararg_vsscanf(const char* str, const char* fmt, BionicVaList* ap);
+
 // ---------------- Bionic 结构体（只列用到的字段布局） ----------------
 // Linux arm64 struct stat（严格 128B，字段偏移见下方断言）
 struct bionic_stat {
@@ -38,12 +55,15 @@ struct bionic_stat {
     int32_t  st_blksize;
     int32_t  __pad2;
     int64_t  st_blocks;
-    int64_t  st_atime;
-    uint64_t st_atime_nsec;
-    int64_t  st_mtime;
-    uint64_t st_mtime_nsec;
-    int64_t  st_ctime;
-    uint64_t st_ctime_nsec;
+    // 注意：字段名不能叫 st_atime —— Darwin 的 <sys/stat.h> 把它定义成
+    // #define st_atime st_atimespec.tv_sec，会把任何结构体的这个字段展开成
+    // 不存在的 st_atimespec。叫 st_atim 就没冲突（Linux 官方名也是 st_atim）。
+    int64_t  st_atim;
+    uint64_t st_atim_nsec;
+    int64_t  st_mtim;
+    uint64_t st_mtim_nsec;
+    int64_t  st_ctim;
+    uint64_t st_ctim_nsec;
     uint32_t __unused4;
     uint32_t __unused5;
 };
@@ -52,7 +72,7 @@ _Static_assert(sizeof(struct bionic_stat) == 128, "Linux arm64 struct stat must 
 _Static_assert(offsetof(struct bionic_stat, st_size) == 48, "st_size offset must be 48");
 _Static_assert(offsetof(struct bionic_stat, st_blksize) == 56, "st_blksize offset must be 56");
 _Static_assert(offsetof(struct bionic_stat, st_blocks) == 64, "st_blocks offset must be 64");
-_Static_assert(offsetof(struct bionic_stat, st_atime) == 72, "st_atime offset must be 72");
+_Static_assert(offsetof(struct bionic_stat, st_atim) == 72, "st_atim offset must be 72");
 
 // Linux arm64 struct dirent（d_name 256B）
 struct bionic_dirent {
