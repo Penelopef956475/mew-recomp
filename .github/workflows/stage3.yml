@@ -60,6 +60,11 @@ jobs:
           curl -fL -o Mewgenics.exe https://raw.githubusercontent.com/871554520/mew-decomp/main/Mewgenics.exe
           ls -l Mewgenics.exe
 
+      - name: 浮点转译回归测试（double 1.5 -> int64）
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O1 -o /tmp/f64test tests/stage2/f64_mulsd_test.cpp
+          /tmp/f64test
       - name: Build lifter
         run: |
           mkdir -p generated
@@ -366,9 +371,13 @@ jobs:
           mkdir -p generated/stage3b
           ./build/mew_lifter --shards 64 --out-dir generated/stage3b --seeds generated/all_seeds.txt \
               --seeds-inside generated/runtime_seeds.txt --exe Mewgenics.exe 2>&1 | tail -6
+          HOT=$(grep -lE 'sub_1403862d0|sub_140386250|sub_140d6aec8|sub_140d1a134' generated/stage3b/shard_*.cpp 2>/dev/null \
+                | sed -E 's/.*shard_([0-9]+)\.cpp/\1/' | paste -sd, - || true)
+          echo "hot shards (-O2): ${HOT:-none}"
           python3 tools/build_stage3.py \
             --src-dir generated/stage3b --obj-dir build-stage3b \
-            --archive build-stage3b/libmew_recomp.a --jobs "$(nproc)" --opt=-O0 2>&1 | tail -6
+            --archive build-stage3b/libmew_recomp.a --jobs "$(nproc)" \
+            --opt=-O0 --opt2-shards="${HOT}" 2>&1 | tail -8
           g++ -std=c++17 -O0 -g -rdynamic -I runtime/include -I shims -I generated/stage3b \
             runtime/src/mew_runner.cpp runtime/src/pe_image_loader.cpp shims/win32_kernel32.cpp \
             build-stage3b/libmew_recomp.a -o build-stage3b/mew_runner -lpthread 2>&1 | tail -5
