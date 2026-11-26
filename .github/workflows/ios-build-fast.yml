@@ -1,0 +1,147 @@
+name: iOS Fast IPA (Ubuntu heavy + short macOS)
+
+# 按手册 P0-1 改造：把重活全压到免费 Ubuntu，macOS 只做「编 shim + 编宿主 + 签名 + 打包」。
+# 关键收益：**只需抢赢一次 macOS 槽位**（旧流程 sdl+app 两个 job 要连赢两次）。
+#
+# 实测背景：本账号的 macOS 作业在排队 15 分钟未分配到机器时会被整刀取消
+# （steps=0、日志 404），所以 macOS 单元必须短。
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'macOS runner label'
+        required: false
+        default: 'macos-15'
+      sdl_tag:
+        description: 'SDL3 tag'
+        required: false
+        default: 'release-3.2.0'
+  push:
+    paths:
+      - .github/workflows/ios-build-fast.yml
+
+jobs:
+  # 1) 免费 Ubuntu：组装 APK → ELF→Mach-O → 官方工具链验收 → 上传产物
+  prepare-dylib:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 组装 APK + 抽 libmain.so
+        run: |
+          set -euo pipefail
+          cat ios_port/vendor/apk_part_*.bin > /tmp/app.apk
+          python3 - <<'PY'
+          import zipfile
+          z = zipfile.ZipFile('/tmp/app.apk')
+          open('/tmp/libmain.so', 'wb').write(z.read('lib/arm64-v8a/libmain.so'))
+          import os; print('libmain.so', os.path.getsize('/tmp/libmain.so'))
+          PY
+
+      - name: ELF -> Mach-O dylib
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 tools/elf2macho_dylib.py /tmp/libmain.so -o out/libmew_relinked.dylib --platform ios
+          ls -l out/libmew_relinked.dylib
+
+      - name: 结构校验（自带 walker）
+        run: python3 ios_port/verify_macho.py out/libmew_relinked.dylib
+
+      - name: 官方工具链门禁（llvm-objdump --macho）
+        run: |
+          set -o pipefail
+          command -v llvm-objdump >/dev/null || {
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq llvm
+          }
+          OBJDUMP=$(command -v llvm-objdump || echo /usr/lib/llvm-18/bin/llvm-objdump)
+          D=out/libmew_relinked.dylib
+          set +e
+          $OBJDUMP --macho --private-headers $D > /tmp/o_h.txt 2>&1; echo "rc_headers=$?"
+          $OBJDUMP --macho --exports-trie  $D > /tmp/o_e.txt 2>&1; echo "rc_exports=$?"
+          $OBJDUMP --macho --rebase        $D > /tmp/o_r.txt 2>&1; echo "rc_rebase=$?"
+          $OBJDUMP --macho --bind          $D > /tmp/o_b.txt 2>&1; echo "rc_bind=$?"
+          set -e
+          RB=$(grep -c '0x' /tmp/o_r.txt || true)
+          BD=$(grep -c '0x' /tmp/o_b.txt || true)
+          echo "rebase_total=$RB bind_total=$BD"
+          if grep -nE 'malformed|inconsistent|bad offset|bad segIndex|too large' /tmp/o_*.txt; then
+            echo "::error::llvm-objdump 报结构错误"; exit 1
+          fi
+          grep -m1 '_SDL_main' /tmp/o_e.txt
+          [ "$RB" = "76945" ] || { echo "::error::rebase 计数不符 $RB"; exit 1; }
+          [ "$BD" = "1348" ]  || { echo "::error::bind 计数不符 $BD"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relinked-dylib
+          path: out/libmew_relinked.dylib
+          retention-days: 3
+
+  # 2) 只抢一次 macOS：编 shim + 编宿主 + 签名 + 打包（目标 < 90 秒）
+  pack-ios-ipa:
+    needs: prepare-dylib
+    runs-on: ${{ github.event.inputs.runner || 'macos-15' }}
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回重链接产物
+        uses: actions/download-artifact@v4
+        with:
+          name: relinked-dylib
+          path: out/
+
+      - name: SDL3.framework 缓存（命中就完全不编）
+        id: sdl-cache
+        uses: actions/cache@v4
+        with:
+          path: out/sdlbuild/SDL3.framework
+          key: sdl3fw-${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}-gles-metal-gpu-v1
+
+      - name: 只在缓存未命中时编 SDL3（OPENGLES + METAL + GPU）
+        if: steps.sdl-cache.outputs.cache-hit != 'true'
+        env:
+          SDL_TAG: ${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/sdlbuild
+          date +%H:%M:%S
+          timeout 300 git clone --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git out/SDL
+          timeout 240 cmake -S out/SDL -B out/sdlbuild \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_FRAMEWORK=ON \
+            -DSDL_OPENGLES=ON -DSDL_OPENGL=ON -DSDL_METAL=ON -DSDL_GPU=ON \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          timeout 600 cmake --build out/sdlbuild --config Release -j "$(sysctl -n hw.ncpu)"
+          rm -rf out/sdlbuild/SDL3.framework
+          cp -R out/sdlbuild/Release-iphoneos/SDL3.framework out/sdlbuild/SDL3.framework
+          date +%H:%M:%S
+          ls -l out/sdlbuild/SDL3.framework/SDL3
+
+      - name: 编 shim + 宿主 + 签名 + 打包
+        env:
+          SKIP_RELINK: '1'
+        run: |
+          set -euo pipefail
+          chmod +x ios_port/build_ios.sh
+          ./ios_port/build_ios.sh
+
+      - name: 失败也要留现场
+        if: always()
+        run: |
+          echo "===== out ====="; ls -lR out 2>/dev/null | head -40 || true
+          echo "===== report ====="; tail -60 out/build_report.txt 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-ipa-${{ github.run_id }}
+          path: |
+            out/*.ipa
+            out/build_report.txt
+          if-no-files-found: warn
+          retention-days: 7
