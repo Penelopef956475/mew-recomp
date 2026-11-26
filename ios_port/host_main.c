@@ -93,6 +93,30 @@ static void log_images(const char* tag) {
     }
 }
 
+// 逐库显式 dlopen：三个库的报错绝不能混成一团（dlerror 只保留最后一次）
+static void* must_dlopen(const char* label, const char* path) {
+    fprintf(stderr, "[host] dlopen %s (%s)...\n", label, path);
+    void* h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (!h) {
+        const char* e = dlerror();
+        fprintf(stderr, "[host] dlopen %s FAILED: %s\n", label, e ? e : "unknown");
+    } else {
+        fprintf(stderr, "[host] dlopen %s -> h=%p\n", label, h);
+    }
+    return h;
+}
+
+// 按 uuid/path 子串找镜像真实加载基址（= mach_header 地址；我们 __TEXT vmaddr 是 0）
+static uintptr_t find_image_base_by_name(const char* want) {
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char* nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, want))
+            return (uintptr_t)_dyld_get_image_header(i);
+    }
+    return 0;
+}
+
 static void* find_mew_header(void) {
     uint32_t n = _dyld_image_count();
     for (uint32_t i = 0; i < n; i++) {
@@ -152,23 +176,35 @@ static int mew_app_main(int argc, char** argv) {
     char real[4096];
     if (getcwd(real, sizeof real)) fprintf(stderr, "[host] cwd = %s\n", real);
 
-    // ---- dlopen ----
-    fprintf(stderr, "[host 3] before dlopen(%s)\n", MEW_DYLIB_NAME);
-    const char* cand[] = { MEW_DYLIB_NAME, "Frameworks/" MEW_DYLIB_NAME,
-                           "../Frameworks/" MEW_DYLIB_NAME };
-    char path[4096];
+    // ---- 分库 dlopen：SDL3 → shim → 主库，每一步都留 dlerror 原文 ----
+    fprintf(stderr, "[host 3] before dlopen(libmew_relinked.dylib)\n");
     void* h = NULL;
-    for (size_t i = 0; i < sizeof cand / sizeof cand[0]; i++) {
-        snprintf(path, sizeof path, "%s/%s", dir, cand[i]);
-        h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-        if (h) break;
-        fprintf(stderr, "[host] dlopen miss %s: %s\n", path, dlerror());
+    {
+        char p3[4096];
+        snprintf(p3, sizeof p3, "%s/Frameworks/libmew_relinked.dylib", dir);
+        // SDK 的 rpath 已指向 @executable_path/Frameworks，但这里用绝对路径更可靠
+        if (!must_dlopen("SDL3", "@rpath/SDL3.framework/SDL3"))
+            fprintf(stderr, "[host] WARN: SDL3 预加载失败，继续试主库\n");
+        if (!must_dlopen("shim", "@rpath/libbionic_shim.dylib"))
+            fprintf(stderr, "[host] WARN: shim 预加载失败，继续试主库\n");
+        h = must_dlopen("mew", p3);
+        if (!h) h = must_dlopen("mew(rpath)", MEW_DYLIB_NAME);
     }
-    fprintf(stderr, "[host 3b] dlopen result h=%p dlerror=%s\n", h, h ? "none" : dlerror());
+    fprintf(stderr, "[host 3b] dlopen result h=%p\n", h);
     if (!h) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "装载失败",
                                  "找不到 libmew_relinked.dylib，包不完整。", NULL);
         return 2;
+    }
+
+    // 把主库真实基址登记给 bionic libc 的 dl_iterate_phdr（PT_GNU_EH_FRAME 上报）
+    {
+        uintptr_t base = find_image_base_by_name(MEW_DYLIB_NAME);
+        typedef void (*set_base_fn)(uintptr_t);
+        set_base_fn set_base = (set_base_fn)dlsym(RTLD_DEFAULT, "mew_eh_register_image");
+        fprintf(stderr, "[host 3c] mew_base=0x%lx set_base=%p\n",
+                (unsigned long)base, (void*)set_base);
+        if (set_base && base) set_base(base);
     }
 
     // ---- 入口地址 ----
