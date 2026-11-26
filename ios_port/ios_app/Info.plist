@@ -13,6 +13,27 @@
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSRequiresIPhoneOS</key><true/>
+    <!-- 图标：文件直接放 .app 根目录，iOS 按 @2x/@3x 约定自动挑 -->
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>AppIcon60x60</string>
+                <string>AppIcon40x40</string>
+                <string>AppIcon29x29</string>
+            </array>
+            <key>CFBundleIconName</key>
+            <string>AppIcon</string>
+        </dict>
+    </dict>
+    <key>CFBundleIconFiles</key>
+    <array>
+        <string>AppIcon60x60</string>
+        <string>AppIcon76x76</string>
+        <string>AppIcon83.5x83.5</string>
+    </array>
     <key>MinimumOSVersion</key><string>15.0</string>
     <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
     <key>UILaunchScreen</key><dict/>
