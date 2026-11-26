@@ -84,6 +84,17 @@ static inline uint64_t x64_clz(uint64_t v, int bits) {
     if (bits == 64) return (uint64_t)__builtin_clzll(v);
     return (uint64_t)(__builtin_clzll(v) - (64 - bits));
 }
+// BSR = Bit Scan Reverse：返回**最高置位 bit 的下标**（0 基），不是前导零个数！
+// 之前 lifter 把 bsr 和 lzcnt 一起映射到 x64_clz，于是
+//   bsr(0x0FFF_FFFF_FFFF_FFFF) 得到 4（前导零数），而正确值是 59
+// 结果 _Hash 的 _Max_bucket_count 被算成 1<<4 = 16，任何 64 桶的哈希表
+// 一初始化就 `ja` 进 _Xlength_error("invalid hash bucket count")。
+// LZCNT 才是前导零个数，两者差 bits-1-idx，不能混用。
+static inline uint64_t x64_bsr(uint64_t v, int bits) {
+    if (!v) return 0;                       // 源为 0 时目标未定义，ZF=1
+    if (bits == 64) return (uint64_t)(63u - __builtin_clzll(v));
+    return (uint64_t)(bits - 1 - (__builtin_clzll(v) - (64 - bits)));
+}
 static inline uint64_t x64_popcnt(uint64_t v, int bits) {
     (void)bits;
     return (uint64_t)__builtin_popcountll(v);
