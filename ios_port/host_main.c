@@ -17,6 +17,7 @@
 
 #define SDL_MAIN_HANDLED 1          // 我们自己写 main，不要 SDL_main.h 改名
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_messagebox.h>   // SDL_MESSAGEBOX_INFORMATION
 
 #include <dlfcn.h>
 #include <errno.h>
