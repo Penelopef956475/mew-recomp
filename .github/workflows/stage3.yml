@@ -396,6 +396,23 @@ jobs:
           tail -40 generated/runner_b.err
           echo
           echo "########## 定点函数观测：谁在算那个 hash bucket count ##########"
+          echo "===== 只在 rdx 异常大时抓：找出是哪一次 rehash 参数炸了 ====="
+          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 \
+            MEW_TRACE_FN=0x1403862d0 MEW_TRACE_FN_MIN_RDX=0x100000000000 \
+            timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
+            > generated/fn_big.out 2> generated/fn_big.err || true
+          grep -E '^\[fn!\]|\[fn:d8\]|\[fn:dc\]|\[fn:e0\]' generated/fn_big.err | tail -30 || true
+          echo "===== 同样方式看 1.5 倍增长那段（0x140386490）====="
+          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 \
+            MEW_TRACE_FN=0x140386490 MEW_TRACE_FN_MIN_RDX=0x100000000000 \
+            timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
+            > generated/fn_big2.out 2> generated/fn_big2.err || true
+          grep -E '^\[fn!\]|\[fn:d8\]|\[fn:dc\]|\[fn:e0\]' generated/fn_big2.err | tail -20 || true
+          echo "===== 无阈值时看 0x140386490 的前 8 次入参 ====="
+          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 MEW_TRACE_FN=0x140386490 \
+            timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
+            > generated/fn_490.out 2> generated/fn_490.err || true
+          grep -E '^\[fn\]|\[fn:d8\]|\[fn:dc\]|\[fn:e0\]' generated/fn_490.err | head -24 || true
           for FN in 0x14038647e 0x1403862d0 0x140386180; do
             echo "===== MEW_TRACE_FN=$FN ====="
             MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 MEW_TRACE_FN=$FN \
