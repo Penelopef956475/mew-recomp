@@ -94,6 +94,17 @@ inline uint64_t mew_trace_fn() {
     return v;
 }
 
+// MEW_TRACE_FN_MIN_RDX=0x<阈值>：只在这个函数的 rdx >= 阈值时才打印，**不限次数**。
+// 用途：哈希表 rehash 那个函数平时被调几千次、rdx 都是 8/16/64 这种正常值，
+// 真正要看的是「哪一次 rdx 突然变成天文数字」，前 40 次采样根本抓不到。
+inline uint64_t mew_trace_min_rdx() {
+    static uint64_t v = [] {
+        const char* e = std::getenv("MEW_TRACE_FN_MIN_RDX");
+        return e ? (uint64_t)std::strtoull(e, nullptr, 0) : 0ULL;
+    }();
+    return v;
+}
+
 #define MEW_SET_CUR_FN(CTX, VA)                                                   \
     do {                                                                          \
         cur_ctx_ptr() = (CTX);                                                    \
@@ -105,6 +116,20 @@ inline uint64_t mew_trace_fn() {
             _f.rsi = (CTX)->rsi; _f.rdi = (CTX)->rdi; _f.r12 = (CTX)->r12;        \
             _f.r13 = (CTX)->r13; _f.r14 = (CTX)->r14; _f.r15 = (CTX)->r15;        \
             _f.valid = true;                                                      \
+        }                                                                         \
+        if (mew_trace_fn() == (uint64_t)(VA) && mew_trace_min_rdx() &&        \
+            (CTX)->rdx >= mew_trace_min_rdx()) {                                  \
+            static int _mew_tb = 0;                                               \
+            if (_mew_tb++ < 200) {                                                \
+                std::fprintf(stderr,                                               \
+                    "[fn!] 0x%llx rcx=0x%llx rdx=0x%llx r8=0x%llx r9=0x%llx rsp=0x%llx\n", \
+                    (unsigned long long)(VA), (unsigned long long)(CTX)->rcx,      \
+                    (unsigned long long)(CTX)->rdx, (unsigned long long)(CTX)->r8, \
+                    (unsigned long long)(CTX)->r9, (unsigned long long)(CTX)->rsp);\
+                mew_probe_qword("[fn:d8]", (CTX)->rcx + 0xd8);                    \
+                mew_probe_qword("[fn:dc]", (CTX)->rcx + 0xdc);                    \
+                mew_probe_qword("[fn:e0]", (CTX)->rcx + 0xe0);                    \
+            }                                                                     \
         }                                                                         \
         if (mew_trace_fn() == (uint64_t)(VA)) {                                   \
             static int _mew_tn = 0;                                               \
