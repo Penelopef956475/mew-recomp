@@ -134,6 +134,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Frameworks"
 cp "${OUT}/shimbuild/MewHost" "$APP/MewHost"
 cp "${ROOT}/ios_port/ios_app/Info.plist" "$APP/Info.plist"
+if [ -d "${ROOT}/ios_port/ios_app/icons" ]; then
+    cp "${ROOT}/ios_port/ios_app/icons"/*.png "$APP/" 2>/dev/null || true
+fi
 cp "${OUT}/libmew_relinked.dylib" "$APP/Frameworks/libmew_relinked.dylib"
 cp "${OUT}/shimbuild/libbionic_shim.dylib" "$APP/Frameworks/libbionic_shim.dylib"
 if [ -n "$SDLF" ]; then
