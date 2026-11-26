@@ -376,9 +376,10 @@ jobs:
           python3 -c "import struct;open('resources.gpak','wb').write(b'GPAK'+struct.pack('<II',1,0)+b'\0'*(65536-12))"
           # runner 以 fastfail(3) 退出是预期行为，不能让它把 set -e 脚本打断
           RC=0
-          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 timeout 120 ./build-stage3b/mew_runner Mewgenics.exe \
+          T0=$(date +%s)
+          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 timeout 600 ./build-stage3b/mew_runner Mewgenics.exe \
             > generated/runner_b.out 2> generated/runner_b.err || RC=$?
-          echo "runner_b rc=$RC"
+          echo "runner_b rc=$RC elapsed=$(( $(date +%s) - T0 ))s"
           echo "misses_b=$(grep -c 'Unmapped indirect target' generated/runner_b.err || true)"
           echo "fastfail_b=$(grep -c 'FASTFAIL' generated/runner_b.err || true)"
           echo "gpak_refs_b=$(grep -c 'resources.gpak' generated/runner_b.err || true)"
@@ -396,30 +397,22 @@ jobs:
           tail -40 generated/runner_b.err
           echo
           echo "########## 定点函数观测：谁在算那个 hash bucket count ##########"
-          echo "===== 只在 rdx 异常大时抓：找出是哪一次 rehash 参数炸了 ====="
+          echo "===== 桶数进度曲线（每 200 次 rehash 打一行，rdx = 桶数）====="
           MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 \
-            MEW_TRACE_FN=0x1403862d0 MEW_TRACE_FN_MIN_RDX=0x100000000000 \
-            timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
-            > generated/fn_big.out 2> generated/fn_big.err || true
-          grep -E '^\[fn!\]|\[fn:d8\]|\[fn:dc\]|\[fn:e0\]' generated/fn_big.err | tail -30 || true
-          echo "===== 同样方式看 1.5 倍增长那段（0x140386490）====="
-          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 \
-            MEW_TRACE_FN=0x140386490 MEW_TRACE_FN_MIN_RDX=0x100000000000 \
-            timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
-            > generated/fn_big2.out 2> generated/fn_big2.err || true
-          grep -E '^\[fn!\]|\[fn:d8\]|\[fn:dc\]|\[fn:e0\]' generated/fn_big2.err | tail -20 || true
-          echo "===== 无阈值时看 0x140386490 的前 8 次入参 ====="
-          MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 MEW_TRACE_FN=0x140386490 \
-            timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
-            > generated/fn_490.out 2> generated/fn_490.err || true
-          grep -E '^\[fn\]|\[fn:d8\]|\[fn:dc\]|\[fn:e0\]' generated/fn_490.err | head -24 || true
-          for FN in 0x14038647e 0x1403862d0 0x140386180; do
-            echo "===== MEW_TRACE_FN=$FN ====="
-            MEW_UNIMPL_CONTINUE=1 MEW_SAFE_MEM=1 MEW_TRACE_FN=$FN \
-              timeout 150 ./build-stage3b/mew_runner Mewgenics.exe \
-              > generated/fn_${FN}.out 2> generated/fn_${FN}.err || true
-            grep -E '^\[fn\]|\[fn:rcx\+0x88\]|\[fn:rdx\]|MSVC C\+\+|invalid hash|可捕获类型' generated/fn_${FN}.err | head -45 || true
-          done
+            MEW_TRACE_FN=0x1403862d0 MEW_TRACE_FN_EVERY=200 \
+            timeout 240 ./build-stage3b/mew_runner Mewgenics.exe \
+            > generated/fn_curve.out 2> generated/fn_curve.err || true
+          grep -E '^\[fn#' generated/fn_curve.err | head -60 || true
+
+          echo "===== 提速对照：关掉 MEW_SAFE_MEM + ABI_GUARD，看是不是 -O0/拦截太慢 ====="
+          T1=$(date +%s)
+          MEW_UNIMPL_CONTINUE=1 timeout 300 ./build-stage3b/mew_runner Mewgenics.exe \
+            > generated/fn_fast.out 2> generated/fn_fast.err
+          RC1=$?
+          echo "fast-mode rc=$RC1 elapsed=$(( $(date +%s) - T1 ))s"
+          echo "fast-mode gpak_refs=$(grep -c 'resources.gpak' generated/fn_fast.err || true)"
+          grep -E '^\[fn#|CreateFileW|resources\.gpak|MSVC C\+\+' generated/fn_fast.err | tail -15 || true
+
           # 复跑一次：看 abort 判定函数 0x140d79870 的入参 + 关键全局的读写打点
           RC=0
           MEW_WATCH=0x200001088,0x200001090,0x2000013a8,0x1413bbc18 MEW_TRACE_FN=0x140d79870 \
