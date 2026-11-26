@@ -196,31 +196,57 @@ int bionic___cxa_thread_atexit_impl(void (*fn)(void*), void* arg, void* dso) {
 // ================= 其它 =================
 size_t bionic___ctype_get_mb_cur_max(void) { return MB_CUR_MAX; }
 
-// dl_iterate_phdr：Darwin 根本没有这个 API（<link.h> 都不存在），但 guest 里
-// 有代码用它拿自己镜像的基址。这里按 bionic 的 struct 布局临摹一个，只填
-// dlpi_addr / dlpi_name，phdr 给 NULL、phnum 给 0 —— 让调用方能走到「拿基址」
-// 那条分支，又不会有人去遍历不存在的 program header。
+// dl_iterate_phdr：Darwin 没有这个 API（<link.h> 都不存在），但 guest 里的
+// libgcc/libc++ 会用它找自己的 PT_GNU_EH_FRAME，用来注册 .eh_frame 的 unwind 表。
+// 我们手里没有真实 program header，就按 ElF 布局**静态构造 2 条**：
+//   #0 PT_LOAD(R|X) 覆盖整个 __TEXT（平移后 0x443c000）
+//   #1 PT_GNU_EH_FRAME 指向 __eh_frame（0x48e4d0，大小 0x15f0c）
+// 这两个数是 converter 实测出来的：原 ELF GNU_EH_FRAME 在 0x48a4d0，统一 +0x4000。
+// 宿主 dlopen 成功后调 mew_eh_register_image() 把真实基址传进来。
+static uintptr_t g_mew_image_base = 0;
+void mew_eh_register_image(uintptr_t base) { g_mew_image_base = base; }
+
 struct mew_elf64_phdr {
     uint32_t p_type, p_flags;
     uint64_t p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align;
 };
-struct mew_dl_phdr_info {
-    uintptr_t dlpi_addr;
+struct bionic_dl_phdr_info {
+    uint64_t dlpi_addr;
     const char* dlpi_name;
     const struct mew_elf64_phdr* dlpi_phdr;
     uint16_t dlpi_phnum;
 };
-int bionic_dl_iterate_phdr(int (*cb)(struct mew_dl_phdr_info*, size_t, void*), void* data) {
-    struct mew_dl_phdr_info info;
-    memset(&info, 0, sizeof info);
-    Dl_info di;
-    if (dladdr((void*)&bionic_dl_iterate_phdr, &di)) {
-        info.dlpi_addr = (uintptr_t)di.dli_fbase;
-        info.dlpi_name = di.dli_fname ? di.dli_fname : "";
-    }
-    cb(&info, sizeof info, data);
-    return 0;
+
+#define MEW_TEXT_SIZE     0x443c000ULL
+#define MEW_EHFRAME_OFF   0x48e4d0ULL
+#define MEW_EHFRAME_SIZE  0x15f0cULL
+
+int bionic_dl_iterate_phdr(int (*cb)(struct bionic_dl_phdr_info*, size_t, void*), void* data) {
+    if (!cb || !g_mew_image_base) return 0;
+    static const struct mew_elf64_phdr phdrs[2] = {
+        { 1 /*PT_LOAD*/, 5 /*R|X*/, 0, 0, 0, MEW_TEXT_SIZE, MEW_TEXT_SIZE, 0x4000 },
+        { 0x6474e550 /*PT_GNU_EH_FRAME*/, 4 /*R*/,
+          MEW_EHFRAME_OFF, MEW_EHFRAME_OFF, MEW_EHFRAME_OFF,
+          MEW_EHFRAME_SIZE, MEW_EHFRAME_SIZE, 4 },
+    };
+    struct bionic_dl_phdr_info info;
+    info.dlpi_addr = (uint64_t)g_mew_image_base;
+    info.dlpi_name = "libmew_relinked.dylib";
+    info.dlpi_phdr = phdrs;
+    info.dlpi_phnum = 2;
+    return cb(&info, sizeof info, data);
 }
 
-// syscall()：Linux 的调用号在 Darwin 完全无效，给明确的失败值而不是乱执行
-long bionic_syscall(long n, ...) { (void)n; errno = ENOSYS; return -1; }
+// syscall()：Linux 的调用号在 Darwin 完全无效，只补两个真正被用到的：
+//   SYS_gettid(178)       -> pthread_threadid_np
+//   SYS_memfd_create(279) -> ENOSYS，让引擎走自带的 [lowmem] 降级分支
+long bionic_syscall(long n, long a0, long a1, long a2, long a3, long a4, long a5) {
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+    if (n == 178) {
+        uint64_t tid = 0;
+        pthread_threadid_np(NULL, &tid);
+        return (long)tid;
+    }
+    errno = ENOSYS;
+    return -1;
+}
