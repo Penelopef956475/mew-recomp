@@ -49,6 +49,10 @@ def main():
     ap.add_argument('--cxx', default='g++')
     ap.add_argument('--extra', action='append', default=[], help='额外参与归档的 .cpp')
     ap.add_argument('--opt', default='-O1')
+    # 热分片单独提速：--opt2-shards=12,37 表示这两个分片用 -O2 编，其余保持 --opt。
+    # 用途：包含 0x140386xxx / 0x140dxxxxx 的那些分片是启动路径的热点，-O2 能快 15~30 倍，
+    # 又不至于让 66 个 TU 全部 -O2 把编译时间拖到不可接受。
+    ap.add_argument('--opt2-shards', default='', help='逗号分隔的分片编号（文件名 shard_NN.cpp 里的 NN）')
     ap.add_argument('--no-archive', action='store_true')
     args = ap.parse_args()
 
@@ -59,15 +63,23 @@ def main():
     if not srcs:
         print('no sources'); return 1
 
-    flags = ['-std=c++17', args.opt, '-w', '-I', 'runtime/include',
-             '-I', args.src_dir]
+    base_flags = ['-std=c++17', '-w', '-I', 'runtime/include', '-I', args.src_dir]
+    hot = {x.strip() for x in args.opt2_shards.split(',') if x.strip()}
     jobs = []
     objs = []
+    hot_used = []
     for s in srcs:
         base = os.path.basename(s).replace('.cpp', '.o')
         obj = os.path.join(args.obj_dir, base)
         objs.append(obj)
+        m = re.search(r'shard_(\d+)\.cpp$', base)
+        is_hot = bool(m and m.group(1) in hot)
+        if is_hot:
+            hot_used.append(base)
+        flags = base_flags + (['-O2'] if is_hot else [args.opt])
         jobs.append((s, obj, args.cxx, flags, []))
+    if hot:
+        print('hot shards (-O2): %s' % (', '.join(hot_used) if hot_used else '未命中任何分片'))
 
     print('compiling %d TUs with -j%d ...' % (len(jobs), args.jobs))
     t0 = time.time()
