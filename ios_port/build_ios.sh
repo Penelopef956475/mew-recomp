@@ -14,7 +14,7 @@ REPORT="${OUT}/build_report.txt"
 mkdir -p "$OUT"
 : > "$REPORT"
 
-say() { echo "==> $*" | tee -a "$REPORT"; }
+say() { echo "==> [$(date +%H:%M:%S)] $*" | tee -a "$REPORT"; }
 num() { echo "    $*" | tee -a "$REPORT"; }
 
 SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
@@ -23,7 +23,12 @@ say "SDK        $SDK"
 say "clang      $CLANG"
 num "$("$CLANG" --version | head -1)"
 
-# ---------- 1) APK 分片 → libmain.so ----------
+# SKIP_RELINK=1：dylib 已由 Ubuntu job 产出并放在 out/libmew_relinked.dylib，
+# 本机跳过「组装 APK + 转换」两段（macOS 槽位宝贵，只做编译+签名+打包）
+if [ "${SKIP_RELINK:-0}" = "1" ] && [ -f "${OUT}/libmew_relinked.dylib" ]; then
+    say "stage 1-2/7 跳过（SKIP_RELINK=1，复用 ${OUT}/libmew_relinked.dylib）"
+    num "dylib $(stat -f%z "${OUT}/libmew_relinked.dylib") bytes"
+else
 say "stage 1/7 组装 APK 分片"
 cat "${ROOT}"/ios_port/vendor/apk_part_*.bin > "${OUT}/app.apk"
 APK="${OUT}/app.apk" LMO="${OUT}/libmain.so" python3 <<'PY' | tee -a "$REPORT"
@@ -40,27 +45,32 @@ say "stage 2/7 ELF→Mach-O 重链接"
 python3 "${ROOT}/tools/elf2macho_dylib.py" "${OUT}/libmain.so" \
         -o "${OUT}/libmew_relinked.dylib" --platform ios 2>&1 | tee -a "$REPORT"
 python3 "${ROOT}/ios_port/verify_macho.py" "${OUT}/libmew_relinked.dylib" 2>&1 | tee -a "$REPORT"
+fi
 
 # ---------- 3) SDL3 (iOS) ----------
 say "stage 3/7 编译 SDL3 for iOS"
 SDL_TAG="${SDL_TAG:-release-3.2.0}"
-if [ -d "${OUT}/SDL/.git" ]; then
-    git -C "${OUT}/SDL" fetch --depth 1 origin "refs/tags/${SDL_TAG}:refs/tags/${SDL_TAG}" || true
+if [ -f "${OUT}/sdlbuild/SDL3.framework/SDL3" ]; then
+    say "SDL3 已缓存，跳过 clone/build"
+elif [ -d "${OUT}/SDL/.git" ]; then
+    timeout 240 git -C "${OUT}/SDL" fetch --depth 1 origin "refs/tags/${SDL_TAG}:refs/tags/${SDL_TAG}" || true
 else
-    git clone --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git "${OUT}/SDL"
+    timeout 300 git clone --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git "${OUT}/SDL"
 fi
-num "SDL commit $(git -C "${OUT}/SDL" rev-parse --short HEAD)"
-cmake -S "${OUT}/SDL" -B "${OUT}/sdlbuild" \
+num "SDL commit $(git -C "${OUT}/SDL" rev-parse --short HEAD 2>/dev/null || echo cached)"
+if [ ! -f "${OUT}/sdlbuild/SDL3.framework/SDL3" ]; then
+timeout 240 cmake -S "${OUT}/SDL" -B "${OUT}/sdlbuild" \
       -DCMAKE_SYSTEM_NAME=iOS \
       -DCMAKE_OSX_ARCHITECTURES=$ARCH \
       -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS \
       -DCMAKE_BUILD_TYPE=Release \
       -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_FRAMEWORK=ON \
-      -DSDL_OPENGLES=ON \
+      -DSDL_OPENGLES=ON -DSDL_METAL=ON -DSDL_GPU=ON \
       -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_INSTALL_TESTS=OFF \
       > "${OUT}/sdl_cmake.log" 2>&1 || { tail -30 "${OUT}/sdl_cmake.log"; exit 1; }
-cmake --build "${OUT}/sdlbuild" --config Release -j "$(sysctl -n hw.ncpu)" \
+timeout 600 cmake --build "${OUT}/sdlbuild" --config Release -j "$(sysctl -n hw.ncpu)" \
       > "${OUT}/sdl_build.log" 2>&1 || { tail -40 "${OUT}/sdl_build.log"; exit 1; }
+fi
 SDLF="$(find "${OUT}/sdlbuild" -name 'SDL3.framework' -maxdepth 5 | head -1 || true)"
 SDLDYLIB=""
 if [ -z "$SDLF" ]; then
@@ -80,6 +90,7 @@ mkdir -p "${OUT}/shimbuild"
     "${SHIMDIR}"/bionic_android.c "${SHIMDIR}"/bionic_tlsdesc.c \
     "${SHIMDIR}"/bionic_varargs.c "${SHIMDIR}"/bionic_varargs.S \
     "${SHIMDIR}"/bionic_libc.c "${SHIMDIR}"/bionic_jmp.S \
+    "${SHIMDIR}"/bionic_tlsdesc.S \
     -o "${OUT}/shimbuild/libbionic_shim.dylib" 2>&1 | tail -40 | tee -a "$REPORT"
 SHIMDYLIB="${OUT}/shimbuild/libbionic_shim.dylib"
 num "libbionic_shim.dylib $(stat -f%z "$SHIMDYLIB") bytes"
