@@ -382,7 +382,18 @@ jobs:
           echo "misses_b=$(grep -c 'Unmapped indirect target' generated/runner_b.err || true)"
           echo "fastfail_b=$(grep -c 'FASTFAIL' generated/runner_b.err || true)"
           echo "gpak_refs_b=$(grep -c 'resources.gpak' generated/runner_b.err || true)"
-          tail -25 generated/runner_b.err
+          echo "===== C++ 异常诊断（按标记抓，不再被 tail 截掉头部）====="
+          grep -nE 'MSVC C\+\+|\[shim\]   code=|magic=0x|obj\[0\.\.32\]|what\(obj\+8\)|可捕获类型|\[shim\]     \[' generated/runner_b.err | head -30 || true
+          echo "===== 抛异常前最后被调到的 Win32 API（按出现顺序）====="
+          grep -oE 'API  [A-Za-z0-9_]+' generated/runner_b.err | awk '{print $2}' | tail -40 | sort | uniq -c | sort -rn | head -20 || true
+          echo "===== 括号/长度类 API 的调用次数（倍增死循环嫌疑人）====="
+          for A in GetModuleFileNameW GetModuleFileNameA GetCurrentDirectoryW GetFullPathNameW GetEnvironmentVariableW WideCharToMultiByte GetFileAttributesW FindFirstFileW CreateFileW GetFileSizeEx ReadFile; do
+            echo "  $A = $(grep -c "API  $A" generated/runner_b.err || true)"
+          done
+          echo "===== 环里的 API 名字（最后 60 条）====="
+          grep -E '^\s+\[[0-9]+\] API ' generated/runner_b.err | tail -60 || true
+          echo "===== 尾 40 行 ====="
+          tail -40 generated/runner_b.err
           # 复跑一次：看 abort 判定函数 0x140d79870 的入参 + 关键全局的读写打点
           RC=0
           MEW_WATCH=0x200001088,0x200001090,0x2000013a8,0x1413bbc18 MEW_TRACE_FN=0x140d79870 \
