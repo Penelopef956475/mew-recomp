@@ -20,5 +20,9 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>UIRequiresFullScreen</key><true/>
+    <!-- 让系统「文件」App 直接暴露沙盒 Documents/：4.78 GiB 的 resources.gpak
+         走这里直传，不进 IPA。覆盖安装时 Documents/ 原地保留，不用重传重签。 -->
+    <key>UIFileSharingEnabled</key><true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
 </dict>
 </plist>
