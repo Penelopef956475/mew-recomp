@@ -33,6 +33,23 @@ for f in "$DYLIB" "$HOST" "$SHIM"; do
     num "$(basename "$f") $(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") bytes"
 done
 [ -d "$SDLFW" ] || { echo "缺少 SDL3.framework: $SDLFW" | tee -a "$REPORT"; exit 2; }
+
+# 硬门禁：旧版 MewHost（裸 main、无日志）绝不允许再被打包成 v0.3.0
+say "MewHost 门禁（SDL_RunApp + mew.log）"
+STRINGS="$(command -v strings || true)"
+check_str() {
+    if [ -n "$STRINGS" ]; then "$STRINGS" "$1" | grep -q "$2"; else
+        python3 - "$1" "$2" <<'PY'
+import sys
+needle = sys.argv[2].encode()
+data = open(sys.argv[1], 'rb').read()
+sys.exit(0 if needle in data else 1)
+PY
+    fi
+}
+check_str "$HOST" "SDL_RunApp" || { echo "::error::MewHost 缺少 SDL_RunApp（会是白屏），拒绝打包" | tee -a "$REPORT"; exit 3; }
+check_str "$HOST" "mew.log"    || { echo "::error::MewHost 缺少 mew.log（不会有日志），拒绝打包" | tee -a "$REPORT"; exit 4; }
+num "SDL_RunApp ✓  mew.log ✓"
 [ -f "$PLIST" ] || { echo "缺少 Info.plist: $PLIST" | tee -a "$REPORT"; exit 2; }
 
 # ldid 可选
