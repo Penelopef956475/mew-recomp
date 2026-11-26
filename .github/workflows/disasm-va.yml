@@ -1,0 +1,38 @@
+name: Disasm by VA (fast)
+
+# 只为「拿到某几个 VA 的精确指令序列」而生：不编 lifter、不装 zydis，
+# 只用 Ubuntu 自带的 objdump 反汇编 PE 里的一小段 .text。
+# 用法：Actions → Run workflow，vas 填空格分隔的十六进制 VA。
+on:
+  workflow_dispatch:
+    inputs:
+      vas:
+        description: '要反汇编的 VA（空格分隔）'
+        required: false
+        default: '0x14038647e 0x1403862d0 0x140386180 0x140386250'
+      span:
+        description: '每个 VA 往后反汇编多少字节'
+        required: false
+        default: '0x120'
+jobs:
+  disasm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: 取 exe
+        run: |
+          curl -fL -o Mewgenics.exe https://raw.githubusercontent.com/871554520/mew-decomp/main/Mewgenics.exe
+          ls -l Mewgenics.exe
+      - name: 反汇编指定 VA
+        env:
+          VAS: ${{ github.event.inputs.vas || '0x14038647e 0x1403862d0 0x140386180 0x140386250' }}
+          SPAN: ${{ github.event.inputs.span || '0x120' }}
+        run: |
+          set -euo pipefail
+          for VA in $VAS; do
+            START=$((VA))
+            END=$((VA + SPAN))
+            echo "===== $VA -> $END ====="
+            objdump -d --no-show-raw-insn \
+              --start-address=$START --stop-address=$END Mewgenics.exe 2>/dev/null | tail -n +7 || true
+          done
