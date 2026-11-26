@@ -1044,7 +1044,16 @@ void shim_KERNEL32_RaiseException(X64Ctx* c) {
             }
         }
 
-        call_trace().dump_tail(20);
+        // 环里既有 FUNC 也有带名字的 API 调用（tag 非空）。之前只打 20 帧，
+        // 结果全是那个 4 帧循环的 FUNC，看不到它到底调了哪个 Win32 API。
+        // 现在默认打 300 帧，并用 MEW_CXX_THROW_FRAMES 可调。
+        size_t nframes = 300;
+        if (const char* e = std::getenv("MEW_CXX_THROW_FRAMES")) {
+            long v = std::strtol(e, nullptr, 10);
+            if (v > 0 && v < 5000) nframes = (size_t)v;
+        }
+        std::fprintf(stderr, "[shim] 调用环最后 %zu 帧（含 API 名字）：\n", nframes);
+        call_trace().dump_tail(nframes);
         std::fprintf(stderr, "[shim] 该异常在真实 Windows 上同样无人 catch → 直接终止，\n"
                              "[shim] 不再返回制造 0x10/0x20/__fastfail(5) 这些次生崩溃。\n");
         std::fflush(nullptr);
