@@ -1080,19 +1080,58 @@ void shim_KERNEL32_RtlUnwind(X64Ctx* c) {
 }
 
 void shim_KERNEL32_WideCharToMultiByte(X64Ctx* c) {
-    // (cp, dwFlags, lpWide, cchWide, lpMulti, cbMulti, lpDefault, pfUsed)
-    uint64_t src = arg2(c);
-    int cch = (int)arg3(c);
-    uint64_t dst = 0;
-    int cbMulti = 0;
-    if (cch < 0) {
-        const uint16_t* p = (const uint16_t*)guest_ptr_from_ctx(c, src);
-        size_t n = 0;
-        while (p && p[n]) ++n;
-        cch = (int)n;
+    // (CodePage, dwFlags, lpWideCharStr, cchWideChar, lpMultiByteStr, cbMultiByte,
+    //  lpDefaultChar, lpUsedDefaultChar)
+    // 前 4 个在 rcx/rdx/r8/r9，第 5/6 个在栈上。旧实现把 dst/cbMulti 直接 (void) 掉了，
+    // 只返回长度：调用方按返回值 resize 之后读到的是空缓冲 —— 这是「字符串长度异常」
+    // 类问题的经典来源，必须真的把 UTF-16 写进去。
+    const uint64_t src_va = arg2(c);
+    const int32_t cch_wide = (int32_t)arg3(c);
+    const uint64_t dst_va = arg4(c);
+    const int32_t cb_multi = (int32_t)arg5(c);
+    const uint64_t used_default_va = mem_read<uint64_t>(c, c->rsp + 0x40);
+
+    if (!src_va) { ret0(c, 0); return; }
+
+    const bool include_nul = (cch_wide < 0);
+    std::string utf8;
+    utf8.reserve(64);
+    for (int32_t i = 0; include_nul || i < cch_wide; ++i) {
+        uint16_t ch = mem_read<uint16_t>(c, src_va + (uint64_t)i * 2);
+        if (ch == 0) {
+            if (include_nul) { utf8.push_back('\0'); break; }
+            continue;
+        }
+        if (ch >= 0xD800 && ch <= 0xDBFF) {           // 代理对
+            uint16_t lo = mem_read<uint16_t>(c, src_va + (uint64_t)(i + 1) * 2);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                uint32_t cp = 0x10000u + (((uint32_t)(ch - 0xD800) << 10) | (uint32_t)(lo - 0xDC00));
+                utf8.push_back((char)(0xF0 | (cp >> 18)));
+                utf8.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+                utf8.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+                utf8.push_back((char)(0x80 | (cp & 0x3F)));
+                ++i;
+                continue;
+            }
+            utf8.push_back('?');
+            if (used_default_va) mem_write<uint32_t>(c, used_default_va, 1);
+            continue;
+        }
+        if (ch < 0x80) {
+            utf8.push_back((char)ch);
+        } else if (ch < 0x800) {
+            utf8.push_back((char)(0xC0 | (ch >> 6)));
+            utf8.push_back((char)(0x80 | (ch & 0x3F)));
+        } else {
+            utf8.push_back((char)(0xE0 | (ch >> 12)));
+            utf8.push_back((char)(0x80 | ((ch >> 6) & 0x3F)));
+            utf8.push_back((char)(0x80 | (ch & 0x3F)));
+        }
     }
-    std::string s = utf16_to_utf8((const uint16_t*)guest_ptr_from_ctx(c, src), (size_t)(cch < 0 ? 0 : cch));
-    // 第 5/6 个参数在栈上，这里简化：若目标指针为 0 只返回所需长度
-    (void)dst; (void)cbMulti;
-    ret0(c, (uint64_t)s.size() + 1);
+
+    if (cb_multi == 0 || dst_va == 0) { ret0(c, utf8.size()); return; }  // 纯问长度
+    if ((size_t)cb_multi < utf8.size()) { ret0(c, 0); return; }         // 容量不足
+    for (size_t k = 0; k < utf8.size(); ++k)
+        mem_write<uint8_t>(c, dst_va + k, (uint8_t)utf8[k]);
+    ret0(c, utf8.size());
 }
