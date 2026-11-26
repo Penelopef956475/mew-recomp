@@ -1,19 +1,22 @@
-// iOS 宿主：dlopen 构建期重链接出来的 libmew_relinked.dylib，然后调 SDL_main。
+// iOS 宿主：让 SDL3 接管 UIApplicationMain，再在它回调进来的函数里 dlopen
+// 构建期重链接出来的 libmew_relinked.dylib，最后调它的 _SDL_main。
 //
-// 启动顺序（顺序本身就是设计，别随手调换）：
-//   1) 定位 exe 目录 → 建好 Documents/ 与 Documents/game/
-//   2) **先把 stdout/stderr 重定向到 Documents/mew.log（无缓冲）**，之后所有日志
-//      都会落到「文件」App 里能直接看的地方 —— 没 Mac 连 Xcode Console 时，这是
-//      真机排错的唯一命根子
-//   3) 首次启动写低内存 settings.txt（Documents/ 与 Documents/game/ 各一份）
-//   4) 检查 Documents/game/resources.gpak；缺了就弹窗 + 正常退出，别闪退
-//   5) gpak 就位才 dlopen，然后 dlsym("SDL_main")，失败退到 header + 0x4075e60
-//   6) 调 SDL_main(0, NULL)，把控制权交给引擎
+// 为什么必须是 SDL_RunApp 而不是裸 int main：
+//   iOS 上一个普通的 C main() 不会启动 UIKit 的窗口/事件循环，屏幕会永远停在
+//   系统白色 LaunchScreen 上（我们第一版真机就是这个白屏）。SDL3 的正确姿势是
+//   由它调 UIApplicationMain，再由它的 AppDelegate 回调「用户 main」。
+//   所以我们把真正的入口交给 SDL_RunApp(argc, argv, mew_app_main, NULL)，
+//   mew_app_main 才是我们的主逻辑。这也是 SDL_main.h 那套宏背后实际做的事。
 //
-// 数据包策略：4.78 GiB 的 resources.gpak **不进 IPA**（超 ZIP32 4 GiB 上限、侧载签名
-// 极慢易失败、每次改代码重传 5 GB 没法调试）。走「文件」App 直传 Documents/game/
-// （Info.plist 已开 UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace），
-// 覆盖安装时 Documents/ 原地保留。
+// 日志：main 一进来就把 stdout/stderr 无缓冲重定向到 Documents/mew.log，
+// 之后所有输出（宿主、shim、游戏内部的 __android_log_print）都落盘到
+// 「文件」App 里能直接看的位置 —— 没 Mac 连 Xcode Console 时这是唯一命根子。
+//
+// 数据包：4.78 GiB 的 resources.gpak 不进 IPA，走「文件」App 直接放进
+// Documents/game/。覆盖安装时 Documents/ 原地保留，不用重传重签。
+
+#define SDL_MAIN_HANDLED 1          // 我们自己写 main，不要 SDL_main.h 改名
+#include <SDL3/SDL_main.h>
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -28,11 +31,13 @@
 #define MEW_DYLIB_NAME      "libmew_relinked.dylib"
 #define MEW_LOG_MAX_BYTES   (8 * 1024 * 1024L)
 
-// 不引 SDL 头，避免宿主依赖 SDL 的编译期宏；只声明要用的那一个符号。
-extern int SDL_ShowSimpleMessageBox(unsigned int flags, const char* title,
-                                    const char* message, void* window);
+// SDL_RunApp 是 SDL3 的「平台入口启动器」，iOS 上它负责 UIApplicationMain。
+// 声明成 weak_import：万一某个 SDL3 构建没导出它，我们还能退回去直接跑主逻辑。
+extern int SDL_RunApp(int argc, char* argv[], SDL_main_func mainFunction, void* reserved)
+    __attribute__((weak_import));
 
 static char g_exe_dir[4096];
+static char g_docs[1024], g_game[1200], g_gpak[1400], g_log[1400];
 
 static const char* exe_dir(void) {
     uint32_t sz = sizeof g_exe_dir;
@@ -40,6 +45,40 @@ static const char* exe_dir(void) {
     char* s = strrchr(g_exe_dir, '/');
     if (s) *s = '\0';
     return g_exe_dir;
+}
+
+// 日志超过 8 MB 滚动一次；游戏日志刷得很凶
+static void rotate_log(const char* log) {
+    struct stat st;
+    if (stat(log, &st) != 0 || st.st_size < MEW_LOG_MAX_BYTES) return;
+    char old[1400];
+    snprintf(old, sizeof old, "%s.1", log);
+    unlink(old);
+    rename(log, old);
+}
+
+static void ensure_dir(const char* p) {
+    if (mkdir(p, 0755) == 0) fprintf(stderr, "[host] 建目录 %s\n", p);
+    else if (errno != EEXIST)
+        fprintf(stderr, "[host] WARN: mkdir(%s) 失败（%s）\n", p, strerror(errno));
+}
+
+// 建目录 + 把 stdout/stderr 接到 mew.log 并关缓冲。返回 0 表示日志已落盘。
+static int logs_setup(void) {
+    const char* home = getenv("HOME");
+    if (!home || !*home) return -1;
+    snprintf(g_docs, sizeof g_docs, "%s/Documents", home);
+    snprintf(g_game, sizeof g_game, "%s/game", g_docs);
+    snprintf(g_gpak, sizeof g_gpak, "%s/resources.gpak", g_game);
+    snprintf(g_log,  sizeof g_log,  "%s/mew.log", g_docs);
+    ensure_dir(g_docs);
+    ensure_dir(g_game);
+    rotate_log(g_log);
+    if (!freopen(g_log, "a", stdout)) return -1;
+    if (!freopen(g_log, "a", stderr)) return -1;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    return 0;
 }
 
 static void log_images(const char* tag) {
@@ -53,7 +92,6 @@ static void log_images(const char* tag) {
     }
 }
 
-// 在已加载镜像里找 libmew_relinked.dylib 的 mach_header
 static void* find_mew_header(void) {
     uint32_t n = _dyld_image_count();
     for (uint32_t i = 0; i < n; i++) {
@@ -63,39 +101,12 @@ static void* find_mew_header(void) {
     return NULL;
 }
 
-// 日志超过 8 MB 就滚动一次，只保留 .1 一份 —— 游戏的日志刷得很凶
-static void rotate_log(const char* log) {
-    struct stat st;
-    if (stat(log, &st) != 0) return;
-    if (st.st_size < MEW_LOG_MAX_BYTES) return;
-    char old[1200];
-    snprintf(old, sizeof old, "%s.1", log);
-    unlink(old);
-    rename(log, old);
-}
-
-// 把 stdout/stderr 都接到日志文件上，并且**关掉缓冲**：
-// 崩溃时缓冲区里的最后几百行正是我们最需要的那些。
-static void redirect_logs(const char* log) {
-    rotate_log(log);
-    if (!freopen(log, "a", stdout)) return;
-    if (!freopen(log, "a", stderr)) return;
-    setvbuf(stdout, NULL, _IONBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
-}
-
 static void write_lowmem_settings_once(const char* base) {
-    char cfg[1400];
+    char cfg[1600];
     snprintf(cfg, sizeof cfg, "%s/settings.txt", base);
-    if (access(cfg, F_OK) == 0) {
-        fprintf(stderr, "[host] settings.txt 已存在，保留：%s\n", cfg);
-        return;
-    }
+    if (access(cfg, F_OK) == 0) return;
     FILE* f = fopen(cfg, "w");
-    if (!f) {
-        fprintf(stderr, "[host] WARN: 写 %s 失败（%s）\n", cfg, strerror(errno));
-        return;
-    }
+    if (!f) { fprintf(stderr, "[host] WARN: 写 %s 失败（%s）\n", cfg, strerror(errno)); return; }
     fputs("texture_scale_big 0.5\n"
           "curve_resolution 2.5\n"
           "soundeffect_cache_size_mb 64\n"
@@ -104,94 +115,62 @@ static void write_lowmem_settings_once(const char* base) {
     fprintf(stderr, "[host] 已写入低内存配置：%s\n", cfg);
 }
 
-static void ensure_dir(const char* p) {
-    if (mkdir(p, 0755) == 0) fprintf(stderr, "[host] 建目录 %s\n", p);
-    else if (errno != EEXIST) fprintf(stderr, "[host] WARN: mkdir(%s) 失败（%s）\n", p, strerror(errno));
-}
-
 static long file_size(const char* p) {
     struct stat st;
     return (stat(p, &st) == 0) ? (long)st.st_size : -1;
 }
 
-int main(int argc, char** argv) {
+// ---------------- SDL3 回调进来的「用户 main」 ----------------
+static int mew_app_main(int argc, char** argv) {
     (void)argc; (void)argv;
     const char* dir = exe_dir();
 
-    const char* home = getenv("HOME");
-    if (!home || !*home) {
-        fprintf(stderr, "[host] FATAL: HOME 取不到\n");
-        return 4;
-    }
-
-    // ---- 1) 目录 ----
-    char docs[1024], game[1200], gpak[1400], log[1400];
-    snprintf(docs, sizeof docs, "%s/Documents", home);
-    snprintf(game, sizeof game, "%s/game", docs);
-    snprintf(gpak, sizeof gpak, "%s/resources.gpak", game);
-    snprintf(log,  sizeof log,  "%s/mew.log", docs);
-    ensure_dir(docs);
-    ensure_dir(game);
-
-    // ---- 2) 日志落盘（必须在任何有意义的输出之前）----
-    redirect_logs(log);
-    fprintf(stderr, "\n[host] ================= boot ================\n");
-    fprintf(stderr, "[host] exe dir  = %s\n", dir);
-    fprintf(stderr, "[host] Documents= %s\n", docs);
-    fprintf(stderr, "[host] game dir = %s\n", game);
-    fprintf(stderr, "[host] log      = %s\n", log);
+    fprintf(stderr, "\n[host 1] enter app main: docs=%s game=%s\n", g_docs, g_game);
     log_images("boot");
 
-    // ---- 3) 低内存配置（两处各写一份，引擎从哪读都能读到）----
-    write_lowmem_settings_once(docs);
-    write_lowmem_settings_once(game);
+    write_lowmem_settings_once(g_docs);
+    write_lowmem_settings_once(g_game);
 
-    // ---- 4) 资源就位检查 ----
-    long gsz = file_size(gpak);
+    // ---- 资源 ----
+    long gsz = file_size(g_gpak);
+    fprintf(stderr, "[host 2] gpak exists=%s size=%ld\n", gsz >= 0 ? "yes" : "no", gsz);
     if (gsz < 0) {
-        fprintf(stderr, "[host] MISSING resources.gpak（预期位置 %s）\n", gpak);
-        SDL_ShowSimpleMessageBox(0x00000010 /* SDL_MESSAGEBOX_INFORMATION */,
-                                 "缺少游戏数据",
+        fprintf(stderr, "[host] MISSING resources.gpak（预期 %s）\n", g_gpak);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "缺少游戏数据",
                                  "请将 resources.gpak 放入「文件 → 我的 iPhone → MewRelink → game」"
                                  " 后重新打开。\n\n详细日志：文件 → 我的 iPhone → MewRelink → mew.log",
                                  NULL);
-        fprintf(stderr, "[host] 已提示用户，正常退出（不是崩溃）\n");
+        fprintf(stderr, "[host] 已提示用户，正常退出\n");
         return 0;
     }
-    fprintf(stderr, "[host] resources.gpak = %ld bytes\n", gsz);
 
-    // 引擎用相对路径找资源，工作目录必须是 game/
-    if (chdir(game) != 0) {
-        fprintf(stderr, "[host] WARN: chdir(%s) 失败（%s），留在 %s\n", game, strerror(errno), dir);
+    if (chdir(g_game) != 0) {
+        fprintf(stderr, "[host] WARN: chdir(%s) 失败（%s），留在 %s\n", g_game, strerror(errno), dir);
         chdir(dir);
     }
     char real[4096];
     if (getcwd(real, sizeof real)) fprintf(stderr, "[host] cwd = %s\n", real);
 
-    // ---- 5) 加载重链接产物 ----
-    const char* cand[] = {
-        MEW_DYLIB_NAME,
-        "Frameworks/" MEW_DYLIB_NAME,
-        "../Frameworks/" MEW_DYLIB_NAME,
-    };
+    // ---- dlopen ----
+    fprintf(stderr, "[host 3] before dlopen(%s)\n", MEW_DYLIB_NAME);
+    const char* cand[] = { MEW_DYLIB_NAME, "Frameworks/" MEW_DYLIB_NAME,
+                           "../Frameworks/" MEW_DYLIB_NAME };
     char path[4096];
     void* h = NULL;
     for (size_t i = 0; i < sizeof cand / sizeof cand[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", dir, cand[i]);
         h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-        if (h) {
-            fprintf(stderr, "[host] dlopen OK: %s\n", path);
-            break;
-        }
+        if (h) break;
         fprintf(stderr, "[host] dlopen miss %s: %s\n", path, dlerror());
     }
+    fprintf(stderr, "[host 3b] dlopen result h=%p dlerror=%s\n", h, h ? "none" : dlerror());
     if (!h) {
-        fprintf(stderr, "[host] FATAL: 找不到 %s\n", MEW_DYLIB_NAME);
-        SDL_ShowSimpleMessageBox(0x00000010, "装载失败",
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "装载失败",
                                  "找不到 libmew_relinked.dylib，包不完整。", NULL);
         return 2;
     }
 
+    // ---- 入口地址 ----
     void* entry = dlsym(h, "SDL_main");
     if (entry) {
         fprintf(stderr, "[host] SDL_main via dlsym = %p\n", entry);
@@ -199,23 +178,39 @@ int main(int argc, char** argv) {
         void* hdr = find_mew_header();
         if (hdr) {
             entry = (void*)((char*)hdr + MEW_SDL_MAIN_OFFSET);
-            fprintf(stderr, "[host] dlsym(SDL_main) 失败（%s），退到 header+0x%llx = %p\n",
+            fprintf(stderr, "[host] dlsym 失败（%s），退到 header+0x%llx = %p\n",
                     dlerror(), (unsigned long long)MEW_SDL_MAIN_OFFSET, entry);
         }
     }
     if (!entry) {
-        fprintf(stderr, "[host] FATAL: 拿不到 SDL_main\n");
-        SDL_ShowSimpleMessageBox(0x00000010, "入口缺失", "拿不到 SDL_main 地址。", NULL);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "入口缺失", "拿不到 SDL_main 地址。", NULL);
         return 3;
     }
 
-    // ---- 6) 交给引擎 ----
-    log_images("pre-SDL_main");
-    fprintf(stderr, "[host] entering SDL_main\n");
+    // ---- 交给引擎 ----
+    log_images("pre-target-main");
+    fprintf(stderr, "[host 4] calling target _SDL_main at %p\n", entry);
     fflush(stderr);
     int (*fn)(int, char**) = (int (*)(int, char**))entry;
     int rc = fn(0, NULL);
-    fprintf(stderr, "[host] SDL_main returned %d\n", rc);
+    fprintf(stderr, "[host 5] target _SDL_main returned rc=%d\n", rc);
     fflush(stderr);
     return rc;
+}
+
+// ---------------- 真正的进程入口 ----------------
+int main(int argc, char* argv[]) {
+    int logged = logs_setup();
+    fprintf(stderr, "\n[host 0] main() entered, logs_setup=%d, calling SDL_RunApp\n", logged);
+
+    if (SDL_RunApp) {
+        // iOS 上这一步会进 UIApplicationMain，窗口/事件循环由 SDL3 建好；
+        // 它在 AppDelegate 里回调 mew_app_main。
+        int rc = SDL_RunApp(argc, argv, mew_app_main, NULL);
+        fprintf(stderr, "[host 9] SDL_RunApp returned %d\n", rc);
+        return rc;
+    }
+
+    fprintf(stderr, "[host 0b] WARN: 没有 SDL_RunApp，退回裸跑主逻辑（iOS 上会白屏）\n");
+    return mew_app_main(argc, argv);
 }
