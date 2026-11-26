@@ -236,9 +236,11 @@ def route(name):
 
 
 def shim_name(name):
-    if name.startswith('__'):
-        return '_bionic' + name          # __errno -> _bionic__errno
-    return '_bionic_' + name             # stat    -> _bionic_stat
+    # 一律 '_bionic_' + name：C 侧的定义就是 bionic_<name>，Mach-O 加前导下划线后
+    # 正好等于这个名字。之前对 __ 开头的符号少写一个下划线（'_bionic' + '__x'），
+    # 而 C 里写的是 bionic___x / ASM 里写的是 _bionic___x —— 三方不一致，dlopen
+    # 时会直接 "symbol not found"。
+    return '_bionic_' + name             # stat -> _bionic_stat, __errno -> _bionic___errno
 
 
 class MachO:
