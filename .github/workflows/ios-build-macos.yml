@@ -1,7 +1,11 @@
 name: iOS build (relink + shim + host + IPA)
 
-# 只在手动触发：macOS runner 排队很贵，不能每次 push ios_port/** 就塞一轮。
-# 想跑就去 Actions 页面点 Run workflow，或者我有意改这个文件时顺手带一次。
+# 只在手动触发 + 改本文件时触发。macOS runner 排队很贵，别每次 push ios_port/** 都塞一轮。
+#
+# 为什么拆成两个 job：这个账号的 macOS 作业在跑到 15:00 时会被整刀取消（
+# run 45820823532 / 45827829689 / 45830434367 全是 job 恰好在 15 分钟整变成
+# cancelled，而且日志 blob 直接 404，什么都看不到）。把「编 SDL3」和「打包 IPA」
+# 拆开，每个 job 都压到 10 分钟以内，就不会撞那面墙；SDL3 产物用 cache 复用。
 on:
   workflow_dispatch:
     inputs:
@@ -12,43 +16,87 @@ on:
   push:
     paths:
       - .github/workflows/ios-build-macos.yml
-# 不加 concurrency：之前两次构建在**排队阶段**被同组的 cancel-in-progress 干掉
-# （run 45820823532 / 45827829689 都是 steps 空、conclusion=cancelled），白等半小时。
-# 宁可让它们排队等着，也不要互相取消。
 
 jobs:
-  build:
+  sdl:
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 14   # 外部那把刀在 15:00 落，自己先失败才能留下日志
     steps:
       - uses: actions/checkout@v4
+      - name: 缓存 SDL3.framework（命中就整段跳过）
+        id: fw
+        uses: actions/cache@v4
+        with:
+          path: out/sdlbuild/SDL3.framework
+          key: sdl3fw-${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}-v3
+      - name: 编 SDL3 for iOS（含 OpenGL ES）
+        if: steps.fw.outputs.cache-hit != 'true'
+        env:
+          SDL_TAG: ${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/sdlbuild
+          date +%H:%M:%S
+          timeout 300 git clone --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL.git out/SDL
+          timeout 240 cmake -S out/SDL -B out/sdlbuild \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_FRAMEWORK=ON \
+            -DSDL_OPENGLES=ON -DSDL_OPENGL=ON \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          timeout 600 cmake --build out/sdlbuild --config Release -j "$(sysctl -n hw.ncpu)"
+          date +%H:%M:%S
+          # 统一放到缓存路径上，供下一步上传 / 下一个 job 使用
+          rm -rf out/sdlbuild/SDL3.framework
+          cp -R out/sdlbuild/Release-iphoneos/SDL3.framework out/sdlbuild/SDL3.framework
+      - name: 确认 framework 就位
+        run: |
+          set -euo pipefail
+          ls -l out/sdlbuild/SDL3.framework/SDL3
+      - name: 上传 SDL3.framework
+        uses: actions/upload-artifact@v4
+        with:
+          name: SDL3-framework
+          path: out/sdlbuild/SDL3.framework
+          if-no-files-found: error
+          retention-days: 7
+
+  app:
+    needs: sdl
+    runs-on: macos-15
+    timeout-minutes: 14   # 外部那把刀在 15:00 落，自己先失败才能留下日志
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回 SDL3.framework
+        uses: actions/download-artifact@v4
+        with:
+          name: SDL3-framework
+          path: out/sdlbuild/SDL3.framework
 
       - name: 环境自检
         run: |
           set -euo pipefail
-          xcodebuild -version
+          xcodebuild -version | head -1
           xcrun --sdk iphoneos --show-sdk-version
           cmake --version | head -1
-          python3 --version
           bash --version | head -1
+          ls -l out/sdlbuild/SDL3.framework/SDL3
 
-      - name: 脚本语法自检（先拦语法错，别浪费这一轮排队）
+      - name: 脚本语法自检
         run: |
           set -euo pipefail
           bash -n ios_port/build_ios.sh
           echo "build_ios.sh 语法 OK"
 
-      - name: 缓存 SDL 源码（避免每轮 clone 卡住白烧时间）
-        uses: actions/cache@v4
-        with:
-          path: out/SDL
-          key: sdl3-${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}-v1
-
-      - name: 全流程构建
+      - name: 重链接 + shim + 宿主 + IPA
         env:
           SDL_TAG: ${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}
         run: |
           set -euo pipefail
+          # out/sdlbuild/SDL3.framework/SDL3 已在 → build_ios.sh 跳过 SDL clone/build
           chmod +x ios_port/build_ios.sh
           ./ios_port/build_ios.sh
 
@@ -56,13 +104,7 @@ jobs:
         if: always()
         run: |
           echo "===== out/ ====="; ls -l out 2>/dev/null || true
-          echo "===== build_report ====="; tail -80 out/build_report.txt 2>/dev/null || true
-          echo "===== sdl_build tail ====="; tail -40 out/sdl_build.log 2>/dev/null || true
-          echo "===== dmesg/otool 摘要 ====="
-          for f in out/Mewgenics.app/MewHost out/Mewgenics.app/Frameworks/*.dylib; do
-            [ -e "$f" ] || continue
-            echo "--- $f"; otool -L "$f" | head -12 || true
-          done
+          echo "===== build_report ====="; tail -60 out/build_report.txt 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
