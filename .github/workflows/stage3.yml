@@ -428,7 +428,12 @@ jobs:
           set -e
           echo "fast-mode rc=$RC1 elapsed=$(( $(date +%s) - T1 ))s"
           echo "fast-mode gpak_refs=$(grep -c 'resources.gpak' generated/fn_fast.err || true)"
-          grep -E '^\[fn#|CreateFileW|resources\.gpak|MSVC C\+\+' generated/fn_fast.err | tail -15 || true
+          echo "===== fast-mode 崩溃现场（关掉 SAFE_MEM 后暴露的真实非法访存）====="
+          grep -nE '^\[CRASH\]|^\[TIMEOUT\]|CreateFileW|resources\.gpak|MSVC C\+\+' generated/fn_fast.err | head -30 || true
+          echo "----- 崩溃点前后 25 行 -----"
+          grep -n '^\[CRASH\]' generated/fn_fast.err | head -1 | cut -d: -f1 | while read L; do
+            [ -n "$L" ] && sed -n "$((L>20?L-20:1)),$((L+25))p" generated/fn_fast.err
+          done || true
 
           # 复跑一次：看 abort 判定函数 0x140d79870 的入参 + 关键全局的读写打点
           RC=0
