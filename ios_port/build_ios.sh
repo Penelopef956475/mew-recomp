@@ -56,6 +56,7 @@ cmake -S "${OUT}/SDL" -B "${OUT}/sdlbuild" \
       -DCMAKE_OSX_DEPLOYMENT_TARGET=$MIN_IOS \
       -DCMAKE_BUILD_TYPE=Release \
       -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_FRAMEWORK=ON \
+      -DSDL_OPENGLES=ON \
       -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_INSTALL_TESTS=OFF \
       > "${OUT}/sdl_cmake.log" 2>&1 || { tail -30 "${OUT}/sdl_cmake.log"; exit 1; }
 cmake --build "${OUT}/sdlbuild" --config Release -j "$(sysctl -n hw.ncpu)" \
@@ -110,7 +111,7 @@ say "stage 5/7 编译 MewHost"
 # 宿主也要链 SDL3：缺数据时要弹 SDL_ShowSimpleMessageBox，光声明不链接会在
 # dyld 绑定时 "symbol not found"。framework 就在包里 Frameworks/ 下，用 rpath 找。
 "$CLANG" -target "${ARCH}-apple-ios${MIN_IOS}" -isysroot "$SDK" -O2 \
-    -F "${OUT}/sdlbuild" -framework SDL3 \
+    -F "${OUT}/sdlbuild" -framework SDL3 -I "${OUT}/sdlbuild/SDL3.framework/Headers" \
     -o "${OUT}/shimbuild/MewHost" "${ROOT}/ios_port/host_main.c" \
     -Wl,-rpath,@executable_path/Frameworks 2>&1 | tail -20 | tee -a "$REPORT"
 num "MewHost $(stat -f%z "${OUT}/shimbuild/MewHost") bytes"
