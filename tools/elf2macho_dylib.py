@@ -300,7 +300,13 @@ class MachO:
                         self.binds.append((r['off'], se['name'], r['add'], t))
                 self.internal_relocs = getattr(self, 'internal_relocs', 0) + 1
             elif t == R_AARCH64_TLSDESC:
-                self.binds.append((r['off'], '__tlsdesc__', r['add'], t))
+                # ELF AArch64 TLSDESC 的 GOT 槽是 16 字节描述符：
+                #   [slot+0] = resolver 地址（运行时 bind 成 _bionic_tlsdesc_resolver）
+                #   [slot+8] = 描述符参数，也就是 .tbss 内的槽偏移 = TLS 符号 st_value + r_addend
+                # 之前这里只写 0，resolver 拿到的 offset 永远是 0，所有 TLS 变量叠在一起。
+                se = elf.symtab[r['sym']] if r['sym'] < len(elf.symtab) else None
+                tls_off = (se['value'] if se else 0) + r['add']
+                self.binds.append((r['off'], '__tlsdesc__', tls_off, t))
             elif t == R_AARCH64_PREL32:
                 continue  # 段内相对，布局保留即天然正确
             else:
@@ -379,6 +385,10 @@ class MachO:
         for va, sym, add, kind in sorted(self.binds):
             if kind == R_AARCH64_TLSDESC:
                 dll, sym_out = '@rpath/libbionic_shim.dylib', '_bionic_tlsdesc_resolver'
+                # 描述符第二个 8 字节 = .tbss 槽偏移（add 就是上面算好的 tls_off）
+                slot2 = va + 8 + elf_base
+                if slot2 + 8 <= len(buf):
+                    struct.pack_into('<Q', buf, slot2, add & 0xFFFFFFFFFFFFFFFF)
             elif not sym:
                 continue
             else:
