@@ -38,6 +38,12 @@ jobs:
           bash -n ios_port/build_ios.sh
           echo "build_ios.sh 语法 OK"
 
+      - name: 缓存 SDL 源码（避免每轮 clone 卡住白烧时间）
+        uses: actions/cache@v4
+        with:
+          path: out/SDL
+          key: sdl3-${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}-v1
+
       - name: 全流程构建
         env:
           SDL_TAG: ${{ github.event.inputs.sdl_tag || 'release-3.2.0' }}
