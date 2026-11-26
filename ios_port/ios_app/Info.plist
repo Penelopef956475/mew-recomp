@@ -7,6 +7,8 @@
     <key>CFBundleIdentifier</key><string>io.dsh.mewrelink</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Mewgenics</string>
+    <!-- 「文件」App 里显示的文件夹名必须和引导文案一致，否则用户找不到 game/ -->
+    <key>CFBundleDisplayName</key><string>MewRelink</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
