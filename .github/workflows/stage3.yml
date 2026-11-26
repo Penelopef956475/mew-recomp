@@ -422,12 +422,14 @@ jobs:
           echo "===== 提速对照：关掉 MEW_SAFE_MEM + ABI_GUARD，看是不是 -O0/拦截太慢 ====="
           T1=$(date +%s)
           set +e
-          MEW_UNIMPL_CONTINUE=1 timeout 300 ./build-stage3b/mew_runner Mewgenics.exe \
+          MEW_UNIMPL_CONTINUE=1 MEW_API_TRACE=1 timeout 300 ./build-stage3b/mew_runner Mewgenics.exe \
             > generated/fn_fast.out 2> generated/fn_fast.err
           RC1=$?
           set -e
           echo "fast-mode rc=$RC1 elapsed=$(( $(date +%s) - T1 ))s"
           echo "fast-mode gpak_refs=$(grep -c 'resources.gpak' generated/fn_fast.err || true)"
+          echo "===== 崩溃前最后 40 条合成桥 API 调用 ====="
+          grep -E '^\[api\] ' generated/fn_fast.err | tail -40 || true
           echo "===== fast-mode 崩溃现场（关掉 SAFE_MEM 后暴露的真实非法访存）====="
           grep -nE '^\[CRASH\]|^\[TIMEOUT\]|CreateFileW|resources\.gpak|MSVC C\+\+' generated/fn_fast.err | head -30 || true
           echo "----- 崩溃点前后 25 行 -----"
