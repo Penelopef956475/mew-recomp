@@ -4,14 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
-void bionic___android_log_print(int prio, const char* tag, const char* fmt, ...) {
-    (void)prio;
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[%s] ", tag ? tag : "?");
-    vfprintf(stderr, fmt, ap);
-    fputc('\n', stderr);
-    va_end(ap);
-}
+// __android_log_print 是变参：实现在 bionic_varargs.c 的 mew_vararg_android_log_print，
+// 由 bionic_varargs.S 的 VARARG_THUNK 桥进来。这里**不能**再定义一个同名函数，
+// 否则链接期直接 duplicate symbol '_bionic___android_log_print'。
 int bionic___android_log_write(int prio, const char* tag, const char* msg) {
     (void)prio;
     fprintf(stderr, "[%s] %s\n", tag ? tag : "?", msg ? msg : "");
