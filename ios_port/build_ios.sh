@@ -78,9 +78,32 @@ mkdir -p "${OUT}/shimbuild"
     "${SHIMDIR}"/bionic_pthread.c "${SHIMDIR}"/bionic_posix.c \
     "${SHIMDIR}"/bionic_android.c "${SHIMDIR}"/bionic_tlsdesc.c \
     "${SHIMDIR}"/bionic_varargs.c "${SHIMDIR}"/bionic_varargs.S \
+    "${SHIMDIR}"/bionic_libc.c "${SHIMDIR}"/bionic_jmp.S \
     -o "${OUT}/shimbuild/libbionic_shim.dylib" 2>&1 | tail -40 | tee -a "$REPORT"
-num "libbionic_shim.dylib $(stat -f%z "${OUT}/shimbuild/libbionic_shim.dylib") bytes"
-num "shim 导出符号 $(nm -gU "${OUT}/shimbuild/libbionic_shim.dylib" | wc -l | tr -d ' ') 个"
+SHIMDYLIB="${OUT}/shimbuild/libbionic_shim.dylib"
+num "libbionic_shim.dylib $(stat -f%z "$SHIMDYLIB") bytes"
+num "shim 导出符号 $(nm -gU "$SHIMDYLIB" | wc -l | tr -d ' ') 个"
+
+# 符号覆盖门禁：guest 要的 132 个名字必须全部存在，缺一个就是运行时 dlopen 失败
+say "stage 4b 符号覆盖门禁（清单 -> _bionic_*）"
+python3 - "$ROOT/ios_port/shim_symbols.txt" > "${OUT}/expected_syms.txt" <<'EXPSYM'
+import sys
+for line in open(sys.argv[1]):
+    s = line.strip()
+    if not s or s.startswith('#'):
+        continue
+    print('_bionic_' + s)
+EXPSYM
+nm -gU "$SHIMDYLIB" | awk '{print $NF}' | sort -u > "${OUT}/actual_syms.txt"
+MISSING="$(comm -23 <(sort -u "${OUT}/expected_syms.txt") "${OUT}/actual_syms.txt" || true)"
+NEXP=$(wc -l < "${OUT}/expected_syms.txt" | tr -d ' ')
+if [ -n "$MISSING" ]; then
+    echo "缺 $(echo "$MISSING" | wc -l | tr -d ' ') 个 / 共 $NEXP：" | tee -a "$REPORT"
+    echo "$MISSING" | head -40 | tee -a "$REPORT"
+    echo "::error::libbionic_shim 符号未覆盖，dlopen 会失败"
+    exit 1
+fi
+num "符号覆盖 $NEXP / $NEXP 全部就位"
 
 # ---------- 5) 宿主 ----------
 say "stage 5/7 编译 MewHost"
