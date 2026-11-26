@@ -53,6 +53,13 @@ cp "$DYLIB" "$APP/Frameworks/libmew_relinked.dylib"
 cp "$SHIM" "$APP/Frameworks/libbionic_shim.dylib"
 cp -R "$SDLFW" "$APP/Frameworks/"
 
+# 图标（iOS 要求放在 .app 根目录，文件名与 CFBundleIconFiles 对应）
+ICONDIR="${ROOT}/ios_port/ios_app/icons"
+if [ -d "$ICONDIR" ]; then
+    cp "$ICONDIR"/*.png "$APP/" 2>/dev/null || true
+    num "图标 $(ls "$ICONDIR" | wc -l | tr -d ' ') 个"
+fi
+
 # SDL3.framework 的 Info.plist 如果缺失就补一个
 if [ ! -f "$APP/Frameworks/SDL3.framework/Info.plist" ]; then
     python3 - "$APP/Frameworks/SDL3.framework/Info.plist" <<'PY'
