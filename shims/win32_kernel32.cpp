@@ -976,6 +976,81 @@ void shim_KERNEL32_RaiseException(X64Ctx* c) {
     const uint64_t* params = nullptr;
     if (arg3(c)) params = reinterpret_cast<const uint64_t*>((uintptr_t)arg3(c));
     if (seh::raise_exception_dispatch(c, code, flags, nparams, params)) return;  // 已接管
+
+    // ---- MSVC C++ 异常（0xE06D7363）没被任何 personality 接管 ----
+    // 注意：这段只在真正派发失败后执行。以前这里直接 ret0 返回，等于假装
+    // RaiseException 成功了：带 EXCEPTION_NONCONTINUABLE 的异常按规范永不返回，
+    // 返回会让 _CxxThrowException 走进未初始化的清理路径，冒出
+    // unmapped write 0x10/0x20/0x28 与 __fastfail(5) 这些**次生**灾难。
+    // 现在把它变成「带完整现场的直接终止」，真凶一眼可见。
+    if (code == 0xE06D7363u) {
+        const uint64_t magic   = params ? params[0] : 0;   // 0x19930520 / ..21 / ..22
+        const uint64_t obj     = params ? params[1] : 0;   // 抛出的 C++ 对象
+        const uint64_t throwin = params ? params[2] : 0;   // _ThrowInfo*
+        const uint64_t imgbase = params ? params[3] : 0;   // 模块基址（x64 固定 4 参数）
+
+        std::fprintf(stderr, "\n[shim] ===== MSVC C++ 异常未被接管 =====\n");
+        std::fprintf(stderr, "[shim]   code=0x%x flags=0x%x nparams=%u\n", code, flags, nparams);
+        std::fprintf(stderr, "[shim]   magic=0x%llx obj=0x%llx throwinfo=0x%llx imagebase=0x%llx\n",
+                     (unsigned long long)magic, (unsigned long long)obj,
+                     (unsigned long long)throwin, (unsigned long long)imgbase);
+
+        // MSVC 的 std::exception 在对象 +8 处常常就是 what() 的字符串指针/正文，
+        // 先按 C 字符串试读一把；读不到就退化成十六进制前 32 字节。
+        if (obj) {
+            const uint8_t* raw = (const uint8_t*)guest_ptr_from_ctx(c, obj);
+            if (raw) {
+                std::fprintf(stderr, "[shim]   obj[0..32] =");
+                for (int i = 0; i < 32; i++) std::fprintf(stderr, " %02x", raw[i]);
+                std::fprintf(stderr, "\n");
+            }
+            const char* what = (const char*)guest_ptr_from_ctx(c, obj + 8);
+            if (what) {
+                char buf[201];
+                size_t i = 0;
+                for (; i < 200 && what[i]; i++) {
+                    unsigned char ch = (unsigned char)what[i];
+                    buf[i] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '.';
+                }
+                buf[i] = 0;
+                if (i >= 3) std::fprintf(stderr, "[shim]   what(obj+8) = \"%s\"\n", buf);
+            }
+        }
+
+        // _ThrowInfo -> CatchableTypeArray -> CatchableType -> TypeDescriptor.name
+        // 全是 RVA（相对 imagebase），改成装饰名（?AVxxx@@）也能直接看出类型。
+        if (throwin && imgbase) {
+            try {
+                const int32_t* ti = (const int32_t*)guest_ptr_from_ctx(c, throwin);
+                if (ti) {
+                    int32_t cta_rva = ti[3];              // pCatchableTypeArray
+                    if (cta_rva) {
+                        const int32_t* cta = (const int32_t*)guest_ptr_from_ctx(c, imgbase + cta_rva);
+                        if (cta && cta[0] > 0 && cta[0] < 32) {
+                            std::fprintf(stderr, "[shim]   可捕获类型 %d 个：\n", cta[0]);
+                            for (int i = 0; i < cta[0] && i < 4; i++) {
+                                int32_t ct_rva = cta[1 + i];
+                                const int32_t* ct = (const int32_t*)guest_ptr_from_ctx(c, imgbase + ct_rva);
+                                if (!ct) continue;
+                                int32_t td_rva = ct[1];        // pType -> TypeDescriptor
+                                const char* nm = (const char*)guest_ptr_from_ctx(c, imgbase + td_rva + 16);
+                                if (nm) std::fprintf(stderr, "[shim]     [%d] %s\n", i, nm);
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+                std::fprintf(stderr, "[shim]   （解析 _ThrowInfo 时出错，已忽略）\n");
+            }
+        }
+
+        call_trace().dump_tail(20);
+        std::fprintf(stderr, "[shim] 该异常在真实 Windows 上同样无人 catch → 直接终止，\n"
+                             "[shim] 不再返回制造 0x10/0x20/__fastfail(5) 这些次生崩溃。\n");
+        std::fflush(nullptr);
+        std::exit(4);
+    }
+
     ret0(c, 0);
 }
 
