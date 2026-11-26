@@ -44,7 +44,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_FRAMEWORK=ON \
-            -DSDL_OPENGLES=ON -DSDL_OPENGL=ON \
+            -DSDL_OPENGLES=ON -DSDL_OPENGL=ON -DSDL_METAL=ON -DSDL_GPU=ON \
             -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
           timeout 600 cmake --build out/sdlbuild --config Release -j "$(sysctl -n hw.ncpu)"
           date +%H:%M:%S
