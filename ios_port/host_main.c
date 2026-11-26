@@ -1,15 +1,20 @@
 // iOS 宿主：dlopen 构建期重链接出来的 libmew_relinked.dylib，然后调 SDL_main。
 //
-// 为什么还要宿主：重链接产物是一个 dylib（代码页全在 __TEXT，可签名、可映射），
-// 真机上「谁去 mmap 它、谁去调入口」必须由 App 本体负责。App 本体只做四件事：
+// 职责只有五件：
 //   1) 找到随包分发的那几个 dylib（同目录 / Frameworks）
 //   2) dlopen（RTLD_NOW，符号缺失当场炸，不要 RTLD_LAZY 拖到运行中途）
-//   3) 把工作目录切到 Documents/game，游戏自己会相对路径找 resources.gpak 与资源
-//   4) 调 SDL_main(0, NULL)，之后一切交给引擎
+//   3) 把工作目录切到 Documents/，并把 resources.gpak 是否就位说清楚
+//   4) 首次启动写一份低内存 settings.txt，避免 iPhone 首帧被 Jetsam 干掉
+//   5) 调 SDL_main(0, NULL)，之后一切交给引擎
 //
-// 注意：不用 registerGNU_EH_FRAME。那条是 Linux 侧 ELF 加载器的活；Mach-O 的
-// __eh_frame 节点由 dyld 直接登记，我们只要保证它被放在 __TEXT 且 __TEXT 段
-// fileoff/vmaddr 从 0 起覆盖 header（converter 已经保证）。
+// 拿入口地址有两条路：优先 dlsym("SDL_main")；失败就退回到「mach_header + 固定偏移」。
+// 我们的 __TEXT vmaddr 就是 0，所以镜像头地址就是基址，0x4075e60 直接加得上——
+// 这条兜底是为了把「dlsym 莫名返回 NULL」这种沉默失败换成能跑通的路径。
+//
+// 数据包策略：机身 4.78 GiB 的 resources.gpak **不进 IPA**（超过 ZIP32 4 GiB 上限，
+// 侧载签名会超时/OOM，而且每次改代码都得重传 5 GB）。改为走「文件」App 直传
+// Documents/（Info.plist 已开 UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace），
+// 覆盖安装时 Documents/ 里的数据原地保留。
 
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
@@ -19,40 +24,83 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define MEW_SDL_MAIN_OFFSET 0x4075e60ULL
+#define MEW_DYLIB_NAME      "libmew_relinked.dylib"
+
+// 不引 SDL 头，避免宿主依赖 SDL 的编译期宏；只声明要用的那一个符号。
+extern int SDL_ShowSimpleMessageBox(unsigned int flags, const char* title,
+                                    const char* message, void* window);
+
 static char g_exe_dir[4096];
 
-static const char *exe_dir(void) {
+static const char* exe_dir(void) {
     uint32_t sz = sizeof g_exe_dir;
     if (_NSGetExecutablePath(g_exe_dir, &sz) != 0) return ".";
-    char *s = strrchr(g_exe_dir, '/');
+    char* s = strrchr(g_exe_dir, '/');
     if (s) *s = '\0';
     return g_exe_dir;
 }
 
-static void log_images(void) {
+static void log_images(const char* tag) {
     uint32_t n = _dyld_image_count();
-    fprintf(stderr, "[host] dyld images = %u\n", n);
+    fprintf(stderr, "[host] %s: dyld images = %u\n", tag, n);
     for (uint32_t i = 0; i < n; i++) {
-        const char *nm = _dyld_get_image_name(i);
+        const char* nm = _dyld_get_image_name(i);
         if (nm && (strstr(nm, "mew") || strstr(nm, "bionic") || strstr(nm, "SDL")))
-            fprintf(stderr, "[host]   [%u] %s @ %p\n", i, nm, (void *)_dyld_get_image_header(i));
+            fprintf(stderr, "[host]   [%u] %s hdr=%p slide=%ld\n", i, nm,
+                    (void*)_dyld_get_image_header(i), (long)_dyld_get_image_vmaddr_slide(i));
     }
 }
 
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-    log_images();
-    const char *dir = exe_dir();
+// 在已加载镜像里找 libmew_relinked.dylib 的 mach_header
+static void* find_mew_header(void) {
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char* nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, MEW_DYLIB_NAME)) return (void*)_dyld_get_image_header(i);
+    }
+    return NULL;
+}
+
+static void write_lowmem_settings_once(const char* dir) {
+    char cfg[1200];
+    snprintf(cfg, sizeof cfg, "%s/settings.txt", dir);
+    if (access(cfg, F_OK) == 0) {
+        fprintf(stderr, "[host] settings.txt 已存在，保留用户配置\n");
+        return;
+    }
+    FILE* f = fopen(cfg, "w");
+    if (!f) {
+        fprintf(stderr, "[host] WARN: 写 settings.txt 失败（%s）\n", cfg);
+        return;
+    }
+    fputs("texture_scale_big 0.5\n"
+          "curve_resolution 2.5\n"
+          "soundeffect_cache_size_mb 64\n"
+          "antialias 0\n", f);
+    fclose(f);
+    fprintf(stderr, "[host] 已写入低内存 settings.txt（防首帧 Jetsam）\n");
+}
+
+static long file_size(const char* p) {
+    struct stat st;
+    return (stat(p, &st) == 0) ? (long)st.st_size : -1;
+}
+
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    log_images("boot");
+
+    const char* dir = exe_dir();
     fprintf(stderr, "[host] exe dir = %s\n", dir);
 
-    const char *cand[] = {
-        "libmew_relinked.dylib",
-        "Frameworks/libmew_relinked.dylib",
-        "../Frameworks/libmew_relinked.dylib",
+    const char* cand[] = {
+        MEW_DYLIB_NAME,
+        "Frameworks/" MEW_DYLIB_NAME,
+        "../Frameworks/" MEW_DYLIB_NAME,
     };
     char path[4096];
-    void *h = NULL;
+    void* h = NULL;
     for (size_t i = 0; i < sizeof cand / sizeof cand[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", dir, cand[i]);
         h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
@@ -63,34 +111,64 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[host] dlopen miss %s: %s\n", path, dlerror());
     }
     if (!h) {
-        fprintf(stderr, "[host] FATAL: 找不到 libmew_relinked.dylib\n");
+        fprintf(stderr, "[host] FATAL: 找不到 %s\n", MEW_DYLIB_NAME);
+        SDL_ShowSimpleMessageBox(0x00000010 /* INFORMATION */, "装载失败",
+                                 "找不到 libmew_relinked.dylib，包不完整。", NULL);
         return 2;
     }
 
-    int (*SDL_main)(int, char **) = (int (*)(int, char **))dlsym(h, "SDL_main");
-    if (!SDL_main) {
-        fprintf(stderr, "[host] FATAL: dlsym(SDL_main) 失败: %s\n", dlerror());
+    // 入口：dlsym 优先，失败退到「镜像头 + 固定偏移」
+    void* entry = dlsym(h, "SDL_main");
+    if (entry) {
+        fprintf(stderr, "[host] SDL_main via dlsym = %p\n", entry);
+    } else {
+        void* hdr = find_mew_header();
+        if (hdr) {
+            entry = (void*)((char*)hdr + MEW_SDL_MAIN_OFFSET);
+            fprintf(stderr, "[host] dlsym(SDL_main) 失败（%s），退到 header+0x%llx = %p\n",
+                    dlerror(), (unsigned long long)MEW_SDL_MAIN_OFFSET, entry);
+        }
+    }
+    if (!entry) {
+        fprintf(stderr, "[host] FATAL: 拿不到 SDL_main\n");
+        SDL_ShowSimpleMessageBox(0x00000010, "入口缺失", "拿不到 SDL_main 地址。", NULL);
         return 3;
     }
-    fprintf(stderr, "[host] SDL_main = %p\n", (void *)SDL_main);
 
-    // 游戏用相对路径打开 resources.gpak / 资源，宿主负责把工作目录摆好
-    char cwd[4096];
-    snprintf(cwd, sizeof cwd, "%s/../Documents/game", dir);
-    if (mkdir(cwd, 0755) == 0)
-        fprintf(stderr, "[host] created %s\n", cwd);
-    if (chdir(cwd) != 0) {
-        // 退回包内目录，至少让缺资源的失败信息落在明确位置
-        if (chdir(dir) != 0) fprintf(stderr, "[host] chdir failed: %s\n", dir);
-        else fprintf(stderr, "[host] WARN: Documents/game 不可用，退回合包目录\n");
+    // ---- 数据目录：Documents/ ----
+    const char* home = getenv("HOME");
+    char docs[1024], gpak[1200];
+    if (!home) {
+        fprintf(stderr, "[host] FATAL: HOME 取不到\n");
+        return 4;
+    }
+    snprintf(docs, sizeof docs, "%s/Documents", home);
+    snprintf(gpak, sizeof gpak, "%s/resources.gpak", docs);
+    fprintf(stderr, "[host] Documents = %s\n", docs);
+
+    write_lowmem_settings_once(docs);
+    if (chdir(docs) != 0) {
+        fprintf(stderr, "[host] WARN: chdir(%s) 失败\n", docs);
+        chdir(dir);
     }
     char real[4096];
     if (getcwd(real, sizeof real)) fprintf(stderr, "[host] cwd = %s\n", real);
 
-    log_images();
+    long gsz = file_size(gpak);
+    if (gsz < 0) {
+        fprintf(stderr, "[host] MISSING resources.gpak\n");
+        SDL_ShowSimpleMessageBox(0x00000010, "缺少游戏数据",
+                                 "请把 resources.gpak 放进「文件 App → 我的 iPhone → MewRelink」"
+                                 "（也就是本 App 的 Documents 目录），然后重新打开。", NULL);
+        return 0;
+    }
+    fprintf(stderr, "[host] resources.gpak = %ld bytes\n", gsz);
+
+    log_images("pre-SDL_main");
     fprintf(stderr, "[host] entering SDL_main\n");
     fflush(stderr);
-    int rc = SDL_main(0, NULL);
+    int (*fn)(int, char**) = (int (*)(int, char**))entry;
+    int rc = fn(0, NULL);
     fprintf(stderr, "[host] SDL_main returned %d\n", rc);
     return rc;
 }
