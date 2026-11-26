@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <errno.h>   // ETIMEDOUT 在 Darwin 的 <errno.h> 里，pthread.h 不保证带进来
 
 #define KIND_MUTEX 0x4D58u   // 'MX'
 #define KIND_COND  0x4344u   // 'CD'
@@ -30,9 +31,8 @@ static void* slot_ensure(void* bionic_obj, unsigned kind, size_t real_size, int*
     pthread_mutex_lock(&g_guard);
     if (s->magic != want || s->real == NULL) {
         void* real = calloc(1, real_size);
-        s->real = real;
-        atomic_thread_fence(memory_order_release);
-        s->magic = want;
+        __atomic_store_n(&s->real, real, __ATOMIC_RELEASE);
+        __atomic_store_n(&s->magic, want, __ATOMIC_RELEASE);
         if (created) *created = 1;
     } else if (created) {
         *created = 0;
@@ -150,11 +150,62 @@ int bionic_pthread_join(pthread_t t, void** r) { return pthread_join(t, r); }
 int bionic_pthread_detach(pthread_t t) { return pthread_detach(t); }
 void bionic_pthread_exit(void* r) { pthread_exit(r); }
 pthread_t bionic_pthread_self(void) { return pthread_self(); }
-int bionic_pthread_once(void* once, void (*fn)(void)) { return pthread_once((pthread_once_t*)once, fn); }
-int bionic_pthread_key_create(unsigned* k, void (*dtor)(void*)) { return pthread_key_create(k, dtor); }
-int bionic_pthread_key_delete(unsigned k) { return pthread_key_delete(k); }
-void* bionic_pthread_getspecific(unsigned k) { return pthread_getspecific(k); }
-int bionic_pthread_setspecific(unsigned k, const void* v) { return pthread_setspecific(k, v); }
+// pthread_once_t：bionic 是 4 字节 int，Darwin 是 8 字节 long。直接转指针会让
+// Darwin 读满 8 字节（越过 guest 的 4 字节对象）。自己实现，只要求那 4 字节可写。
+int bionic_pthread_once(void* once, void (*fn)(void)) {
+    int* p = (int*)once;
+    if (__atomic_load_n(p, __ATOMIC_ACQUIRE) == 2) return 0;
+    static pthread_mutex_t om = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&om);
+    if (__atomic_load_n(p, __ATOMIC_RELAXED) != 2) {
+        fn();
+        __atomic_store_n(p, 2, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&om);
+    return 0;
+}
+
+// pthread_key_t：bionic 是 4 字节 unsigned，Darwin 是 8 字节 unsigned long。
+// 直接透传会写穿 guest 的 4 字节槽，所以用一张小表做索引。
+#define MEW_MAX_KEYS 1024
+static pthread_key_t g_keys[MEW_MAX_KEYS];
+static unsigned char g_key_used[MEW_MAX_KEYS];
+static pthread_mutex_t g_key_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int bionic_pthread_key_create(unsigned* k, void (*dtor)(void*)) {
+    if (!k) return 22;
+    pthread_mutex_lock(&g_key_lock);
+    for (unsigned i = 1; i < MEW_MAX_KEYS; i++) {
+        if (g_key_used[i]) continue;
+        pthread_key_t dk;
+        int r = pthread_key_create(&dk, dtor);
+        if (r != 0) { pthread_mutex_unlock(&g_key_lock); return 11; }
+        g_keys[i] = dk;
+        g_key_used[i] = 1;
+        *k = i;
+        pthread_mutex_unlock(&g_key_lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_key_lock);
+    return 11;
+}
+int bionic_pthread_key_delete(unsigned k) {
+    if (k == 0 || k >= MEW_MAX_KEYS) return 22;
+    pthread_mutex_lock(&g_key_lock);
+    if (!g_key_used[k]) { pthread_mutex_unlock(&g_key_lock); return 22; }
+    pthread_key_delete(g_keys[k]);
+    g_key_used[k] = 0;
+    pthread_mutex_unlock(&g_key_lock);
+    return 0;
+}
+void* bionic_pthread_getspecific(unsigned k) {
+    if (k == 0 || k >= MEW_MAX_KEYS || !g_key_used[k]) return NULL;
+    return pthread_getspecific(g_keys[k]);
+}
+int bionic_pthread_setspecific(unsigned k, const void* v) {
+    if (k == 0 || k >= MEW_MAX_KEYS || !g_key_used[k]) return 22;
+    return pthread_setspecific(g_keys[k], v) == 0 ? 0 : 22;
+}
 
 // pthread_attr_t：Bionic 56B / Darwin 64B，直接透传会写穿 8 字节栈内存。
 // 做法：在自己的 56B 结构里只存 detachstate + stacksize，pthread_create 时临时构造 Darwin attr。
