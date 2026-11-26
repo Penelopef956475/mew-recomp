@@ -51,9 +51,9 @@ static void stat_to_bionic(const struct stat* ds, struct bionic_stat* bs) {
     bs->st_size = ds->st_size;
     bs->st_blksize = (int32_t)ds->st_blksize;
     bs->st_blocks = ds->st_blocks;
-    bs->st_atime = ds->st_atimespec.tv_sec;   bs->st_atime_nsec = ds->st_atimespec.tv_nsec;
-    bs->st_mtime = ds->st_mtimespec.tv_sec;   bs->st_mtime_nsec = ds->st_mtimespec.tv_nsec;
-    bs->st_ctime = ds->st_ctimespec.tv_sec;   bs->st_ctime_nsec = ds->st_ctimespec.tv_nsec;
+    bs->st_atim = ds->st_atimespec.tv_sec;   bs->st_atim_nsec = ds->st_atimespec.tv_nsec;
+    bs->st_mtim = ds->st_mtimespec.tv_sec;   bs->st_mtim_nsec = ds->st_mtimespec.tv_nsec;
+    bs->st_ctim = ds->st_ctimespec.tv_sec;   bs->st_ctim_nsec = ds->st_ctimespec.tv_nsec;
 }
 int bionic_stat(const char* p, struct bionic_stat* out) {
     struct stat ds;
@@ -95,11 +95,17 @@ int bionic_munmap(void* addr, size_t len) { return munmap(addr, len); }
 int bionic_madvise(void* addr, size_t len, int adv) { return madvise(addr, len, adv); }
 
 // ---------------- stdio 伪 FILE ----------------
-// Bionic 的 __sF 是 3 个内联 FILE 结构；这里只提供符号与映射，实参仍交给 libc
+// Bionic 的 __sF 是 3 个内联 FILE 结构；这里只提供地址空间，实参仍交给 libc。
+// 但 stdout/stderr 这两个**变量**必须真的指向 Darwin 的流：guest 里
+// fprintf(stderr, ...) 会先读这个指针再解引用，留 0 就是立刻段错误。
 static unsigned char g_sF[3 * 512];
 void* bionic___sF = g_sF;
 FILE* bionic_stdout = (FILE*)0;
 FILE* bionic_stderr = (FILE*)0;
+__attribute__((constructor)) static void bionic_stdio_init(void) {
+    bionic_stdout = stdout;
+    bionic_stderr = stderr;
+}
 
 // ---------------- 其它 Linux 专有 ----------------
 unsigned long bionic_getauxval(unsigned long type) {
